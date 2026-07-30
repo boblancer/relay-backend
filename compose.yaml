@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: relay
+      POSTGRES_PASSWORD: relay
+      POSTGRES_USER: relay
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    ports:
+      - "5432:5432"
+    volumes:
+      - relay-postgres:/var/lib/postgresql/data
+
+volumes:
+  relay-postgres:
+

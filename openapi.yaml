@@ -1,0 +1,1034 @@
+openapi: 3.1.0
+info:
+  title: Browser Memory Recorder Cloud Workflow API
+  version: 1.0.0
+  summary: Cloud persistence contract for canonical browser workflows.
+  description: |
+    This contract is the handoff boundary between Browser Memory Recorder's
+    local BFF and a separately implemented cloud persistence backend.
+
+    Version 1 intentionally covers workflow persistence only. It does not
+    define authentication, profiles, deletion, migration, pagination,
+    collaboration, replay execution, or local-file mirroring.
+
+    The backend is authoritative for workflow identity, lifecycle fields,
+    timestamps, and revisions. All writes must be atomic. Workflow values can
+    contain credentials, tokens, payment data, or other sensitive information,
+    so list responses and errors must never include step payloads or targets.
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+tags:
+  - name: Workflows
+    description: Canonical workflow persistence.
+x-contract-semantics:
+  canonicalSchemaVersion: "1.2"
+  maximumRequestBytes: 1048576
+  listOrdering: updatedAt descending
+  authentication: Shared HTTP Basic credentials.
+  mutationRules:
+    - Compare expectedRevision and apply the mutation in one atomic operation.
+    - Increment revision exactly once for a successful new mutation.
+    - Do not mutate stored state when validation or persistence fails.
+    - Return the original result when an idempotency key is replayed with the same request.
+    - Return an idempotency conflict when a key is reused for different request content.
+  privacyRules:
+    - Never include step payloads, targets, parameter values, or source session IDs in list responses.
+    - Never include workflow content or sensitive values in error messages.
+
+security:
+  - basicAuth: []
+
+paths:
+  /v1/workflows:
+    get:
+      operationId: listWorkflows
+      tags:
+        - Workflows
+      summary: List workflow summaries
+      description: |
+        Returns all workflow summaries ordered by `updatedAt` descending.
+        Version 1 is intentionally unpaginated.
+
+        A summary contains only workflow identity and lifecycle metadata plus
+        ordered step IDs, names, and positions. It must not contain full steps,
+        payloads, targets, Browserbase session IDs, or parameter values.
+      responses:
+        "200":
+          description: Workflow summaries ordered from most recently updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+    post:
+      operationId: createWorkflow
+      tags:
+        - Workflows
+      summary: Create a workflow draft
+      description: |
+        Creates a canonical empty workflow draft.
+
+        The backend generates the UUID and timestamps and returns:
+
+        - `schemaVersion: "1.2"`
+        - `name: "Untitled recording"`
+        - `status: "draft"`
+        - `revision: 1`
+        - `source.provider: "browserbase"`
+        - `source.sessionId: ""`
+        - an empty `steps` array
+
+        Replaying the same idempotency key returns the original `201` response
+        and must not create another workflow.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Canonical workflow draft created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/workflows/{workflowId}:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowId"
+
+    get:
+      operationId: getWorkflow
+      tags:
+        - Workflows
+      summary: Load a canonical workflow
+      description: Returns the complete canonical workflow document.
+      responses:
+        "200":
+          description: Complete canonical workflow.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+    put:
+      operationId: saveWorkflow
+      tags:
+        - Workflows
+      summary: Save a workflow snapshot
+      description: |
+        Atomically saves an edited workflow when `expectedRevision` equals the
+        current stored revision.
+
+        The route `workflowId` must equal `workflow.id`. The backend preserves
+        the stored workflow's ID, creation time, lifecycle status, and finish
+        time. It sets `updatedAt` to the server time and increments `revision`
+        exactly once.
+
+        If `expectedRevision` is stale, return `409` without changing stored
+        state. Replaying the same idempotency key and identical request returns
+        the original successful response rather than evaluating the stale
+        revision again.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/SaveWorkflowRequest"
+      responses:
+        "200":
+          description: Canonical saved workflow with its new revision.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/MutationConflict"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/workflows/{workflowId}/finish:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowId"
+
+    post:
+      operationId: finishWorkflow
+      tags:
+        - Workflows
+      summary: Finish a workflow
+      description: |
+        Atomically saves the supplied workflow and marks it complete when
+        `expectedRevision` equals the current stored revision.
+
+        A workflow must contain at least one step. The route `workflowId` must
+        equal `workflow.id`. The backend preserves `createdAt`, increments the
+        revision exactly once, sets `updatedAt` to the server time, changes
+        `status` to `complete`, and sets `finishedAt` to the server time only
+        when it has not already been set.
+
+        Replaying the same idempotency key and identical request returns the
+        original successful response without incrementing the revision again.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/SaveWorkflowRequest"
+      responses:
+        "200":
+          description: Canonical completed workflow with its new revision.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/MutationConflict"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: Shared credentials configured by the backend operator.
+
+  parameters:
+    WorkflowId:
+      name: workflowId
+      in: path
+      required: true
+      description: Server-generated workflow UUID.
+      schema:
+        type: string
+        format: uuid
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        UUID identifying one logical mutation.
+
+        Keys are global across workflow mutation endpoints. Reusing a key with
+        the same method, path, and canonical request content returns the
+        original status and body. Reusing it for different content returns
+        `409 idempotency_conflict`.
+      schema:
+        type: string
+        format: uuid
+
+  requestBodies:
+    SaveWorkflowRequest:
+      required: true
+      description: |
+        Complete canonical workflow plus the revision last loaded by the
+        caller. The total request body must not exceed 1 MiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SaveWorkflowRequest"
+
+  responses:
+    Unauthorized:
+      description: Shared HTTP Basic credentials are missing or invalid.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: HTTP Basic authentication challenge.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            unauthorized:
+              value:
+                error:
+                  code: unauthorized
+                  message: Authentication is required.
+
+    ValidationFailed:
+      description: The path, request body, or workflow is invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            validation:
+              value:
+                error:
+                  code: validation_failed
+                  message: The workflow request is invalid.
+
+    NotFound:
+      description: The workflow does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            missing:
+              value:
+                error:
+                  code: not_found
+                  message: The workflow was not found.
+
+    MutationConflict:
+      description: |
+        The expected revision is stale or the idempotency key was previously
+        used for different request content.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            revision:
+              value:
+                error:
+                  code: revision_conflict
+                  message: The workflow changed since it was loaded.
+            idempotency:
+              value:
+                error:
+                  code: idempotency_conflict
+                  message: The idempotency key was already used for another request.
+
+    IdempotencyConflict:
+      description: The idempotency key was previously used for another request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            idempotency:
+              value:
+                error:
+                  code: idempotency_conflict
+                  message: The idempotency key was already used for another request.
+
+    RequestTooLarge:
+      description: The request body exceeds 1 MiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            tooLarge:
+              value:
+                error:
+                  code: validation_failed
+                  message: The workflow request must be 1 MiB or smaller.
+
+    Unavailable:
+      description: Workflow persistence is temporarily unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            unavailable:
+              value:
+                error:
+                  code: unavailable
+                  message: Workflow storage is temporarily unavailable.
+
+    Internal:
+      description: An unexpected persistence failure occurred.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            internal:
+              value:
+                error:
+                  code: internal
+                  message: The workflow storage operation failed.
+
+  schemas:
+    ErrorCode:
+      type: string
+      enum:
+        - unauthorized
+        - validation_failed
+        - not_found
+        - revision_conflict
+        - idempotency_conflict
+        - unavailable
+        - internal
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required:
+            - code
+            - message
+          properties:
+            code:
+              $ref: "#/components/schemas/ErrorCode"
+            message:
+              type: string
+              minLength: 1
+              description: Safe message that contains no workflow or storage details.
+
+    WorkflowListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - workflows
+      properties:
+        workflows:
+          type: array
+          description: Summaries ordered by `updatedAt` descending.
+          items:
+            $ref: "#/components/schemas/WorkflowSummary"
+
+    WorkflowSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - status
+        - updatedAt
+        - steps
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          description: Canonical trimmed workflow name.
+        status:
+          $ref: "#/components/schemas/WorkflowStatus"
+        updatedAt:
+          type: string
+          format: date-time
+        steps:
+          type: array
+          description: Step summaries ordered by `order` ascending.
+          items:
+            $ref: "#/components/schemas/WorkflowStepSummary"
+
+    WorkflowStepSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - order
+      properties:
+        id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+        order:
+          type: integer
+          minimum: 0
+
+    SaveWorkflowRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - workflow
+        - expectedRevision
+      properties:
+        workflow:
+          $ref: "#/components/schemas/Workflow"
+        expectedRevision:
+          type: integer
+          minimum: 1
+          description: Revision last loaded by the caller.
+
+    Workflow:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - id
+        - name
+        - status
+        - revision
+        - createdAt
+        - updatedAt
+        - source
+        - steps
+      properties:
+        schemaVersion:
+          type: string
+          const: "1.2"
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          description: Trimmed by the canonical boundary and non-empty afterward.
+        status:
+          $ref: "#/components/schemas/WorkflowStatus"
+        revision:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+        source:
+          $ref: "#/components/schemas/WorkflowSource"
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowStep"
+
+    WorkflowStatus:
+      type: string
+      enum:
+        - draft
+        - complete
+
+    WorkflowSource:
+      type: object
+      additionalProperties: false
+      required:
+        - provider
+        - sessionId
+      properties:
+        provider:
+          type: string
+          const: browserbase
+        sessionId:
+          type: string
+          description: May be empty when no recording session has started.
+        startUrl:
+          type: string
+
+    WorkflowStep:
+      oneOf:
+        - $ref: "#/components/schemas/NavigateStep"
+        - $ref: "#/components/schemas/ClickStep"
+        - $ref: "#/components/schemas/FillStep"
+        - $ref: "#/components/schemas/SetDateStep"
+        - $ref: "#/components/schemas/SelectStep"
+        - $ref: "#/components/schemas/CheckStep"
+        - $ref: "#/components/schemas/UncheckStep"
+        - $ref: "#/components/schemas/KeypressStep"
+        - $ref: "#/components/schemas/SubmitStep"
+      discriminator:
+        propertyName: type
+        mapping:
+          navigate: "#/components/schemas/NavigateStep"
+          click: "#/components/schemas/ClickStep"
+          fill: "#/components/schemas/FillStep"
+          set_date: "#/components/schemas/SetDateStep"
+          select: "#/components/schemas/SelectStep"
+          check: "#/components/schemas/CheckStep"
+          uncheck: "#/components/schemas/UncheckStep"
+          keypress: "#/components/schemas/KeypressStep"
+          submit: "#/components/schemas/SubmitStep"
+
+    StepBase:
+      type: object
+      required:
+        - id
+        - order
+        - name
+        - enabled
+        - page
+        - metadata
+      properties:
+        id:
+          type: string
+          minLength: 1
+        order:
+          type: integer
+          minimum: 0
+        name:
+          type: string
+          minLength: 1
+          description: Trimmed by the canonical boundary and non-empty afterward.
+        enabled:
+          type: boolean
+        page:
+          $ref: "#/components/schemas/PageDescriptor"
+        target:
+          $ref: "#/components/schemas/ElementTarget"
+        position:
+          $ref: "#/components/schemas/ViewportPosition"
+        waitAfter:
+          $ref: "#/components/schemas/ReplayWait"
+        metadata:
+          $ref: "#/components/schemas/StepMetadata"
+
+    ElementStepBase:
+      allOf:
+        - $ref: "#/components/schemas/StepBase"
+        - type: object
+          required:
+            - target
+          properties:
+            target:
+              $ref: "#/components/schemas/ReplayableElementTarget"
+
+    NavigateStep:
+      allOf:
+        - $ref: "#/components/schemas/StepBase"
+        - type: object
+          required:
+            - type
+            - payload
+          properties:
+            type:
+              type: string
+              const: navigate
+            payload:
+              type: object
+              additionalProperties: false
+              required:
+                - url
+              properties:
+                url:
+                  type: string
+                  minLength: 1
+      unevaluatedProperties: false
+
+    ClickStep:
+      allOf:
+        - $ref: "#/components/schemas/ElementStepBase"
+        - type: object
+          required:
+            - type
+          properties:
+            type:
+              type: string
+              const: click
+            payload:
+              $ref: "#/components/schemas/EmptyPayload"
+      unevaluatedProperties: false
+
+    FillStep:
+      allOf:
+        - $ref: "#/components/schemas/ElementStepBase"
+        - type: object
+          required:
+            - type
+            - payload
+            - parameterBinding
+          properties:
+            type:
+              type: string
+              const: fill
+            payload:
+              type: object
+              additionalProperties: false
+              required:
+                - value
+              properties:
+                value:
+                  type: string
+            parameterBinding:
+              $ref: "#/components/schemas/ParameterBinding"
+      unevaluatedProperties: false
+
+    SetDateStep:
+      allOf:
+        - $ref: "#/components/schemas/ElementStepBase"
+        - type: object
+          required:
+            - type
+            - payload
+          properties:
+            type:
+              type: string
+              const: set_date
+            payload:
+              type: object
+              additionalProperties: false
+              required:
+                - value
+              properties:
+                value:
+                  type: string
+                  pattern: '^\d{4}-\d{2}-\d{2}$'
+                  description: Calendar date formatted as YYYY-MM-DD.
+      unevaluatedProperties: false
+
+    SelectStep:
+      allOf:
+        - $ref: "#/components/schemas/ElementStepBase"
+        - type: object
+          required:
+            - type
+            - payload
+          properties:
+            type:
+              type: string
+              const: select
+            payload:
+              type: object
+              additionalProperties: false
+              required:
+                - value
+              properties:
+                value:
+                  type: string
+                label:
+                  type: string
+      unevaluatedProperties: false
+
+    CheckStep:
+      allOf:
+        - $ref: "#/components/schemas/ElementStepBase"
+        - type: object
+          required:
+            - type
+          properties:
+            type:
+              type: string
+              const: check
+            payload:
+              $ref: "#/components/schemas/EmptyPayload"
+      unevaluatedProperties: false
+
+    UncheckStep:
+      allOf:
+        - $ref: "#/components/schemas/ElementStepBase"
+        - type: object
+          required:
+            - type
+          properties:
+            type:
+              type: string
+              const: uncheck
+            payload:
+              $ref: "#/components/schemas/EmptyPayload"
+      unevaluatedProperties: false
+
+    KeypressStep:
+      allOf:
+        - $ref: "#/components/schemas/ElementStepBase"
+        - type: object
+          required:
+            - type
+            - payload
+          properties:
+            type:
+              type: string
+              const: keypress
+            payload:
+              type: object
+              additionalProperties: false
+              required:
+                - key
+                - modifiers
+              properties:
+                key:
+                  type: string
+                  minLength: 1
+                modifiers:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - Alt
+                      - Control
+                      - Meta
+                      - Shift
+      unevaluatedProperties: false
+
+    SubmitStep:
+      allOf:
+        - $ref: "#/components/schemas/ElementStepBase"
+        - type: object
+          required:
+            - type
+          properties:
+            type:
+              type: string
+              const: submit
+            payload:
+              $ref: "#/components/schemas/EmptyPayload"
+      unevaluatedProperties: false
+
+    EmptyPayload:
+      type: object
+      additionalProperties: false
+      maxProperties: 0
+
+    ParameterBinding:
+      oneOf:
+        - $ref: "#/components/schemas/RecordedParameterBinding"
+        - $ref: "#/components/schemas/FixedParameterBinding"
+        - $ref: "#/components/schemas/ProfileParameterBinding"
+        - $ref: "#/components/schemas/RuntimeParameterBinding"
+      discriminator:
+        propertyName: source
+        mapping:
+          recorded: "#/components/schemas/RecordedParameterBinding"
+          fixed: "#/components/schemas/FixedParameterBinding"
+          profile: "#/components/schemas/ProfileParameterBinding"
+          runtime: "#/components/schemas/RuntimeParameterBinding"
+
+    RecordedParameterBinding:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+      properties:
+        source:
+          type: string
+          const: recorded
+
+    FixedParameterBinding:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - value
+      properties:
+        source:
+          type: string
+          const: fixed
+        value:
+          type: string
+          maxLength: 10000
+
+    ProfileParameterBinding:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - field
+      properties:
+        source:
+          type: string
+          const: profile
+        field:
+          type: string
+          enum:
+            - identity.fullName
+            - identity.email
+            - location.countryRegion
+            - location.postalCode
+
+    RuntimeParameterBinding:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+      properties:
+        source:
+          type: string
+          const: runtime
+
+    PageDescriptor:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - url
+      properties:
+        id:
+          type: string
+          minLength: 1
+        url:
+          type: string
+        title:
+          type: string
+
+    StepMetadata:
+      type: object
+      additionalProperties: false
+      required:
+        - recordedAt
+        - origin
+        - sensitive
+      properties:
+        recordedAt:
+          type: string
+          format: date-time
+        origin:
+          type: string
+          enum:
+            - recorded
+            - manual
+        sensitive:
+          type: boolean
+
+    ViewportPosition:
+      type: object
+      additionalProperties: false
+      required:
+        - x
+        - y
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+        frameUrl:
+          type: string
+
+    ReplayWait:
+      type: object
+      additionalProperties: false
+      properties:
+        delayMs:
+          type: integer
+          minimum: 0
+          maximum: 30000
+        condition:
+          $ref: "#/components/schemas/ReplayWaitCondition"
+      anyOf:
+        - required:
+            - condition
+        - required:
+            - delayMs
+          properties:
+            delayMs:
+              type: integer
+              minimum: 1
+              maximum: 30000
+
+    ReplayWaitCondition:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - target
+      properties:
+        state:
+          type: string
+          enum:
+            - visible
+            - hidden
+        target:
+          $ref: "#/components/schemas/ReplayableElementTarget"
+
+    ElementTarget:
+      type: object
+      additionalProperties: false
+      properties:
+        selector:
+          type: string
+          minLength: 1
+        role:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+        text:
+          type: string
+          minLength: 1
+        tagName:
+          type: string
+        inputType:
+          type: string
+        frameUrl:
+          type: string
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/LocatorCandidate"
+
+    ReplayableElementTarget:
+      allOf:
+        - $ref: "#/components/schemas/ElementTarget"
+        - anyOf:
+            - required:
+                - selector
+            - required:
+                - role
+            - required:
+                - name
+            - required:
+                - text
+            - required:
+                - candidates
+              properties:
+                candidates:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: "#/components/schemas/LocatorCandidate"
+
+    LocatorCandidate:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - value
+      properties:
+        kind:
+          type: string
+          enum:
+            - testId
+            - role
+            - accessibleName
+            - label
+            - text
+            - css
+            - xpath
+        value:
+          type: string
+          minLength: 1
+        name:
+          type: string
+        exact:
+          type: boolean
+          default: true
+        unique:
+          type: boolean
