@@ -5,6 +5,11 @@ class WorkflowError(Exception):
     """Base class for safe, contract-facing failures."""
 
 
+class AuthenticationError(WorkflowError):
+    def __init__(self) -> None:
+        super().__init__("Authentication is required.")
+
+
 class ValidationFailedError(WorkflowError):
     def __init__(self, message: str = "The workflow request is invalid.") -> None:
         super().__init__(message)

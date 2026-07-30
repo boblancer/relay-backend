@@ -20,7 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "httpx",
+  "httpx2",
   "jsonschema",
   "openapi-spec-validator",
   "pytest",
@@ -41,4 +41,3 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-
