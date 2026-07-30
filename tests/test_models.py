@@ -91,6 +91,65 @@ def test_element_steps_require_a_replayable_target() -> None:
         Workflow.model_validate(document)
 
 
+@pytest.mark.parametrize(
+    ("step_type", "fields"),
+    [
+        ("click", {}),
+        (
+            "set_date",
+            {"payload": {"value": "2026-07-30"}},
+        ),
+        (
+            "select",
+            {"payload": {"value": "us", "label": "United States"}},
+        ),
+        ("check", {}),
+        ("uncheck", {}),
+        (
+            "keypress",
+            {"payload": {"key": "Enter", "modifiers": ["Control"]}},
+        ),
+        ("submit", {}),
+    ],
+)
+def test_all_element_step_variants_match_the_contract(
+    step_type: str,
+    fields: dict,
+) -> None:
+    document = workflow_document()
+    step = deepcopy(document["steps"][0])
+    step.pop("parameterBinding")
+    step["type"] = step_type
+    step.update(fields)
+    if "payload" not in fields:
+        step.pop("payload")
+    document["steps"] = [step]
+
+    workflow = Workflow.model_validate(document)
+
+    assert workflow.steps[0].type == step_type
+    _assert_matches_contract(workflow)
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        {"source": "recorded"},
+        {"source": "fixed", "value": "secret"},
+        {"source": "profile", "field": "identity.email"},
+        {"source": "runtime"},
+    ],
+)
+def test_all_parameter_bindings_match_the_contract(binding: dict) -> None:
+    document = workflow_document()
+    document["steps"] = [document["steps"][0]]
+    document["steps"][0]["parameterBinding"] = binding
+
+    workflow = Workflow.model_validate(document)
+
+    _assert_matches_contract(workflow)
+
+
 def test_summary_contains_only_safe_fields_and_sorts_steps() -> None:
     summary = to_workflow_summary(Workflow.model_validate(workflow_document()))
     dumped = summary.model_dump(mode="json", by_alias=True)
@@ -132,6 +191,13 @@ def test_canonical_request_hash_ignores_json_property_order() -> None:
 
 def test_validated_workflow_matches_authoritative_openapi_schema() -> None:
     workflow = Workflow.model_validate(workflow_document())
+
+    _assert_matches_contract(workflow)
+    assert workflow.id == UUID("b4749f7e-4b22-43bf-8ef4-8ba5f79cb17b")
+    assert workflow.created_at == datetime(2026, 7, 30, 12, tzinfo=UTC)
+
+
+def _assert_matches_contract(workflow: Workflow) -> None:
     with open("openapi.yaml", encoding="utf-8") as contract_file:
         contract = yaml.safe_load(contract_file)
     registry = Registry().with_resource(
@@ -148,5 +214,3 @@ def test_validated_workflow_matches_authoritative_openapi_schema() -> None:
     )
 
     assert errors == []
-    assert workflow.id == UUID("b4749f7e-4b22-43bf-8ef4-8ba5f79cb17b")
-    assert workflow.created_at == datetime(2026, 7, 30, 12, tzinfo=UTC)

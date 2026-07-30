@@ -138,6 +138,39 @@ def test_reusing_a_key_for_different_content_conflicts(service: WorkflowService)
         service.save(created.id, changed, key)
 
 
+def test_replay_after_later_mutation_returns_original_result_without_rewinding(
+    service: WorkflowService,
+) -> None:
+    created = service.create(uuid4())
+    first_request = edited_request(created)
+    first_key = uuid4()
+    first = service.save(created.id, first_request, first_key)
+    second_request = SaveWorkflowRequest(
+        workflow=first.model_copy(update={"name": "Later edit"}),
+        expected_revision=2,
+    )
+    second = service.save(created.id, second_request, uuid4())
+
+    replayed = service.save(created.id, first_request, first_key)
+
+    assert replayed == first
+    assert service.get(created.id) == second
+    assert service.get(created.id).revision == 3
+
+
+def test_idempotency_keys_are_global_across_mutation_paths(service: WorkflowService) -> None:
+    created = service.create(uuid4())
+    shared_key = uuid4()
+    saved = service.save(created.id, edited_request(created), shared_key)
+
+    with pytest.raises(IdempotencyConflictError):
+        service.finish(
+            created.id,
+            SaveWorkflowRequest(workflow=saved, expected_revision=2),
+            shared_key,
+        )
+
+
 def test_route_and_document_ids_must_match(service: WorkflowService) -> None:
     created = service.create(uuid4())
 
@@ -180,3 +213,19 @@ def test_list_reads_safe_summaries_without_sensitive_document_values(
     assert "4111111111111111" not in repr(summaries)
     assert "sensitive-session" not in repr(summaries)
     assert service.get(UUID(str(created.id))).source.session_id == "sensitive-session"
+
+
+def test_list_orders_workflows_by_most_recent_update(database: Database) -> None:
+    timestamps = iter(
+        (
+            datetime(2026, 7, 30, 12, tzinfo=UTC),
+            datetime(2026, 7, 30, 13, tzinfo=UTC),
+        )
+    )
+    service = WorkflowService(database, clock=lambda: next(timestamps))
+    older = service.create(uuid4())
+    newer = service.create(uuid4())
+
+    listed = service.list()
+
+    assert [summary.id for summary in listed.workflows] == [newer.id, older.id]
