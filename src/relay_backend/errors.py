@@ -38,8 +38,3 @@ class PersistenceUnavailableError(WorkflowError):
 class InternalPersistenceError(WorkflowError):
     def __init__(self) -> None:
         super().__init__("The workflow storage operation failed.")
-
-
-class RequestTooLargeError(WorkflowError):
-    def __init__(self) -> None:
-        super().__init__("The workflow request must be 1 MiB or smaller.")

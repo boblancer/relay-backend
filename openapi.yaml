@@ -7,9 +7,9 @@ info:
     This contract is the handoff boundary between Browser Memory Recorder's
     local BFF and a separately implemented cloud persistence backend.
 
-    Version 1 intentionally covers workflow persistence only. It does not
-    define authentication, profiles, deletion, migration, pagination,
-    collaboration, replay execution, or local-file mirroring.
+    Version 1 intentionally covers workflow persistence plus shared HTTP Basic
+    authentication. It does not define profiles, deletion, migration,
+    pagination, collaboration, replay execution, or local-file mirroring.
 
     The backend is authoritative for workflow identity, lifecycle fields,
     timestamps, and revisions. All writes must be atomic. Workflow values can

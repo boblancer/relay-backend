@@ -18,6 +18,8 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 NonEmptyString = Annotated[str, StringConstraints(min_length=1)]
+StrictBoolean = Annotated[bool, Field(strict=True)]
+StrictNumber = Annotated[float, Field(strict=True)]
 
 
 class ApiModel(BaseModel):
@@ -73,8 +75,8 @@ class LocatorCandidate(ApiModel):
     kind: LocatorKind
     value: NonEmptyString
     name: str | None = None
-    exact: bool = True
-    unique: bool | None = None
+    exact: StrictBoolean = True
+    unique: StrictBoolean | None = None
 
 
 class ElementTarget(ApiModel):
@@ -118,12 +120,12 @@ class StepOrigin(StrEnum):
 class StepMetadata(ApiModel):
     recorded_at: AwareDatetime
     origin: StepOrigin
-    sensitive: bool
+    sensitive: StrictBoolean
 
 
 class ViewportPosition(ApiModel):
-    x: float
-    y: float
+    x: StrictNumber
+    y: StrictNumber
     frame_url: str | None = None
 
 
@@ -138,7 +140,7 @@ class ReplayWaitCondition(ApiModel):
 
 
 class ReplayWait(ApiModel):
-    delay_ms: int | None = Field(default=None, ge=0, le=30_000)
+    delay_ms: int | None = Field(default=None, strict=True, ge=0, le=30_000)
     condition: ReplayWaitCondition | None = None
 
     @model_validator(mode="after")
@@ -217,9 +219,9 @@ class KeypressPayload(ApiModel):
 
 class StepBase(ApiModel):
     id: NonEmptyString
-    order: int = Field(ge=0)
+    order: int = Field(strict=True, ge=0)
     name: NonEmptyString
-    enabled: bool
+    enabled: StrictBoolean
     page: PageDescriptor
     target: ElementTarget | None = None
     position: ViewportPosition | None = None
@@ -304,7 +306,7 @@ class Workflow(ApiModel):
     id: UUID
     name: NonEmptyString
     status: WorkflowStatus
-    revision: int = Field(ge=1)
+    revision: int = Field(strict=True, ge=1)
     created_at: AwareDatetime
     updated_at: AwareDatetime
     finished_at: AwareDatetime | None = None
@@ -322,13 +324,13 @@ class Workflow(ApiModel):
 
 class SaveWorkflowRequest(ApiModel):
     workflow: Workflow
-    expected_revision: int = Field(ge=1)
+    expected_revision: int = Field(strict=True, ge=1)
 
 
 class WorkflowStepSummary(ApiModel):
     id: NonEmptyString
     name: NonEmptyString
-    order: int = Field(ge=0)
+    order: int = Field(strict=True, ge=0)
 
 
 class WorkflowSummary(ApiModel):

@@ -83,6 +83,24 @@ def test_workflow_rejects_unexpected_properties() -> None:
         Workflow.model_validate(document)
 
 
+@pytest.mark.parametrize(
+    ("field", "coerced_value"),
+    [
+        ("enabled", "true"),
+        ("order", "1"),
+    ],
+)
+def test_workflow_rejects_coercive_primitive_values(
+    field: str,
+    coerced_value: str,
+) -> None:
+    document = workflow_document()
+    document["steps"][0][field] = coerced_value
+
+    with pytest.raises(ValidationError):
+        Workflow.model_validate(document)
+
+
 def test_element_steps_require_a_replayable_target() -> None:
     document = workflow_document()
     document["steps"][0]["target"] = {}

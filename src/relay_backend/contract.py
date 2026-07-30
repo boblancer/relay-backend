@@ -5,7 +5,11 @@ from typing import Any
 
 import yaml
 
-CONTRACT_PATH = Path(__file__).resolve().parents[2] / "openapi.yaml"
+REPOSITORY_CONTRACT_PATH = Path(__file__).resolve().parents[2] / "openapi.yaml"
+PACKAGED_CONTRACT_PATH = Path(__file__).with_name("openapi.yaml")
+CONTRACT_PATH = (
+    REPOSITORY_CONTRACT_PATH if REPOSITORY_CONTRACT_PATH.exists() else PACKAGED_CONTRACT_PATH
+)
 
 
 def load_openapi_contract() -> dict[str, Any]:

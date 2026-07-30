@@ -29,6 +29,7 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/relay_backend"]
+force-include = { "openapi.yaml" = "relay_backend/openapi.yaml" }
 
 [tool.pytest.ini_options]
 addopts = "-ra"

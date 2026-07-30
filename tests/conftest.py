@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from unittest.mock import patch
 
 import psycopg
 import pytest
@@ -21,7 +22,8 @@ def migrated_database() -> Iterator[None]:
         "sqlalchemy.url",
         DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1),
     )
-    command.upgrade(config, "head")
+    with patch.dict(os.environ, {"DATABASE_URL": DATABASE_URL}):
+        command.upgrade(config, "head")
     yield
 
 

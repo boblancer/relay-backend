@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from relay_backend.data.database import Database
 from relay_backend.main import create_app
@@ -60,14 +61,29 @@ def save_payload(created: dict) -> dict:
     return {"workflow": document, "expectedRevision": created["revision"]}
 
 
+def test_settings_reject_an_empty_shared_password() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url=DATABASE_URL,
+            basic_auth_username="relay",
+            basic_auth_password="",
+            _env_file=None,
+        )
+
+
 def test_api_requires_shared_basic_credentials(client: TestClient) -> None:
     client.headers.pop("Authorization")
 
     missing = client.get("/v1/workflows")
     wrong = client.get("/v1/workflows", auth=("relay", "wrong-password"))
+    malformed = client.get(
+        "/v1/workflows",
+        headers={"Authorization": "Basic not-base64"},
+    )
 
     assert missing.status_code == 401
     assert wrong.status_code == 401
+    assert malformed.status_code == 401
     assert missing.headers["www-authenticate"] == "Basic"
     assert missing.json() == {
         "error": {
@@ -76,6 +92,7 @@ def test_api_requires_shared_basic_credentials(client: TestClient) -> None:
         }
     }
     assert wrong.json() == missing.json()
+    assert malformed.json() == missing.json()
 
 
 def test_create_get_and_list_follow_the_contract(client: TestClient) -> None:
@@ -109,6 +126,27 @@ def test_create_get_and_list_follow_the_contract(client: TestClient) -> None:
             }
         ]
     }
+
+
+def test_create_rejects_an_unexpected_body_without_consuming_the_key(
+    client: TestClient,
+) -> None:
+    key = str(uuid4())
+
+    rejected = client.post(
+        "/v1/workflows",
+        headers={"Idempotency-Key": key},
+        json={"unexpected": "sensitive-value"},
+    )
+    retried = client.post(
+        "/v1/workflows",
+        headers={"Idempotency-Key": key},
+    )
+
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "validation_failed"
+    assert "sensitive-value" not in rejected.text
+    assert retried.status_code == 201
 
 
 def test_save_maps_revision_and_idempotency_conflicts(client: TestClient) -> None:

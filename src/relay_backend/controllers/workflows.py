@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, Request
 
 from relay_backend.auth import require_basic_auth
+from relay_backend.errors import ValidationFailedError
 from relay_backend.models.workflows import (
     SaveWorkflowRequest,
     Workflow,
@@ -23,6 +24,11 @@ def _service(request: Request) -> WorkflowService:
     return request.app.state.workflow_service
 
 
+async def _require_empty_body(request: Request) -> None:
+    if await request.body():
+        raise ValidationFailedError
+
+
 @router.get("", response_model=WorkflowListResponse)
 def list_workflows(request: Request) -> WorkflowListResponse:
     return _service(request).list()
@@ -30,6 +36,7 @@ def list_workflows(request: Request) -> WorkflowListResponse:
 
 @router.post(
     "",
+    dependencies=[Depends(_require_empty_body)],
     response_model=Workflow,
     response_model_exclude_none=True,
     status_code=201,

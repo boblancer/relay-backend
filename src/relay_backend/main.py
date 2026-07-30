@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from relay_backend.contract import load_openapi_contract
 from relay_backend.controllers.workflows import router as workflow_router
@@ -15,7 +16,6 @@ from relay_backend.errors import (
     AuthenticationError,
     IdempotencyConflictError,
     PersistenceUnavailableError,
-    RequestTooLargeError,
     RevisionConflictError,
     ValidationFailedError,
     WorkflowError,
@@ -63,6 +63,25 @@ def create_app(
 
 
 def _install_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(StarletteHTTPException)
+    async def framework_http_error(
+        request: Request,
+        error: StarletteHTTPException,
+    ) -> JSONResponse:
+        del request
+        if error.status_code == 401:
+            return _error_response(
+                401,
+                "unauthorized",
+                "Authentication is required.",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"detail": error.detail},
+            headers=error.headers,
+        )
+
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(
         request: Request,
@@ -89,8 +108,6 @@ def _install_error_handlers(app: FastAPI) -> None:
             return _error_response(409, "revision_conflict", str(error))
         if isinstance(error, IdempotencyConflictError):
             return _error_response(409, "idempotency_conflict", str(error))
-        if isinstance(error, RequestTooLargeError):
-            return _error_response(413, "validation_failed", str(error))
         if isinstance(error, PersistenceUnavailableError):
             return _error_response(503, "unavailable", str(error))
         return _error_response(500, "internal", "The workflow storage operation failed.")
