@@ -1,2 +1,1 @@
 """Browser workflow persistence backend."""
-

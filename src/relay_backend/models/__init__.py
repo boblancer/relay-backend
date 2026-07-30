@@ -1,2 +1,1 @@
 """Validated application models."""
-
