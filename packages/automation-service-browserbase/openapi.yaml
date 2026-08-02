@@ -1,0 +1,212 @@
+openapi: 3.1.0
+info:
+  title: Relay Browserbase Automation Service
+  version: 1.0.0
+  summary: Stateless execution of finalized Relay workflows.
+  description: |
+    Internal server-to-server API for running one complete schema 1.2 workflow in a
+    fresh Browserbase session. Runs are not persisted and must not be retried
+    automatically because browser actions can have side effects.
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+security:
+  - bearerAuth: []
+x-contract-semantics:
+  maximumRequestBytes: 1048576
+  responseMediaType: application/x-ndjson
+  stateless: true
+  privacyRules:
+    - Never emit workflow documents, URLs, payloads, parameter values, credentials, provider session identifiers, connection URLs, or raw exceptions.
+    - Do not enable request-body or request-header logging.
+paths:
+  /v1/run:
+    post:
+      operationId: runWorkflow
+      summary: Run one finalized workflow
+      description: |
+        Validates the request before creating a paid Browserbase session. A valid run
+        returns a stream of privacy-safe JSON Lines. The final line always has type
+        `worker.outcome`. Disconnecting cancels the run; the result cannot be resumed
+        or retrieved later.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunRequest"
+      responses:
+        "200":
+          description: Privacy-safe progress events followed by one terminal outcome.
+          headers:
+            X-Run-Id:
+              description: Ephemeral correlation UUID repeated in each JSON Line.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                description: Newline-delimited RunStreamLine objects.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/InvalidRun"
+        "429":
+          $ref: "#/components/responses/AtCapacity"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/ShuttingDown"
+  /health/live:
+    get:
+      operationId: getLiveness
+      security: []
+      summary: Report process liveness
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+  /health/ready:
+    get:
+      operationId: getReadiness
+      security: []
+      summary: Report whether the service accepts new runs
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+        "503":
+          description: The process is shutting down.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque service token
+  schemas:
+    RunRequest:
+      type: object
+      additionalProperties: false
+      required: [workflow]
+      properties:
+        workflow:
+          type: object
+          description: Complete canonical Relay schema 1.2 workflow document.
+        startStepId:
+          type: string
+          minLength: 1
+        parameterValues:
+          type: object
+          additionalProperties:
+            type: string
+    RunStreamLine:
+      type: object
+      required: [runId, type]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        type:
+          type: string
+      additionalProperties: true
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, shutting_down]
+  responses:
+    InvalidRequest:
+      description: The JSON request shape is invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: A valid bearer service token is required.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotAcceptable:
+      description: The caller does not accept application/x-ndjson.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RequestTooLarge:
+      description: The request exceeds 1 MiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnsupportedMediaType:
+      description: The request is not application/json.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InvalidRun:
+      description: The workflow or parameter selection cannot be run.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    AtCapacity:
+      description: The process is already running its configured maximum.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Internal:
+      description: The service could not start the run.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ShuttingDown:
+      description: The service is no longer accepting runs during shutdown.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Healthy:
+      description: The process is healthy.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Health"
