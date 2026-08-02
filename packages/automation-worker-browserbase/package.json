@@ -1,0 +1,39 @@
+{
+  "name": "@relay/automation-worker-browserbase",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "relay-browserbase-worker": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "cli": "node dist/cli.js",
+    "test": "vitest run",
+    "test:browserbase": "BROWSERBASE_E2E=1 vitest run tests/browserbase.smoke.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@browserbasehq/sdk": "^2.16.0",
+    "@relay/automation-core": "file:../automation-core",
+    "playwright-core": "^1.61.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.0"
+  }
+}
