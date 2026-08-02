@@ -1,0 +1,35 @@
+{
+  "name": "@relay/automation-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "playwright-core": "^1.61.1"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.61.1",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.0"
+  }
+}
