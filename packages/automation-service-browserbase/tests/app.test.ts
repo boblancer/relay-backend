@@ -7,9 +7,11 @@ import type {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildAutomationService, type SafeLogRecord } from "../src/app.js";
 import type { AutomationServiceConfig } from "../src/config.js";
+import type { InngestRunExecutor } from "../src/inngest.js";
 
 const config: AutomationServiceConfig = {
   host: "127.0.0.1",
+  inngestDev: false,
   port: 8080,
   maxConcurrentRuns: 1,
   retryAfterSeconds: 2,
@@ -55,15 +57,17 @@ function fixture(
   const createWorker = vi.fn((_workerConfig: BrowserbaseWorkerConfig) => ({ run })) as unknown as (
     workerConfig: BrowserbaseWorkerConfig,
   ) => BrowserbaseAutomationWorker;
+  const registerInngest = vi.fn();
   const service = buildAutomationService(
     { ...config, ...overrides },
     {
       createWorker,
       log: (record) => logs.push(record),
       randomUUID: () => "11111111-1111-4111-8111-111111111111",
+      registerInngest,
     },
   );
-  return { createWorker, logs, run, service };
+  return { createWorker, logs, registerInngest, run, service };
 }
 
 function authorizedHeaders(accept = "application/x-ndjson") {
@@ -79,6 +83,66 @@ afterEach(() => {
 });
 
 describe("automation service contract", () => {
+  it("registers Inngest only when the local POC is enabled", async () => {
+    const disabled = fixture();
+    const enabled = fixture(undefined, { inngestDev: true });
+    const missingRoute = await disabled.service.app.inject({
+      method: "GET",
+      url: "/api/inngest",
+    });
+
+    expect(disabled.registerInngest).not.toHaveBeenCalled();
+    expect(missingRoute.statusCode).toBe(404);
+    expect(enabled.registerInngest).toHaveBeenCalledOnce();
+
+    await disabled.service.shutdown();
+    await enabled.service.shutdown();
+  });
+
+  it("shares local capacity between direct and Inngest runs", async () => {
+    let finish!: (outcome: BrowserbaseRunOutcome) => void;
+    let inngestExecute!: InngestRunExecutor;
+    let markRunStarted!: () => void;
+    const runStarted = new Promise<void>((resolve) => {
+      markRunStarted = resolve;
+    });
+    const run = vi.fn(
+      (input: BrowserbaseRunInput) =>
+        new Promise<BrowserbaseRunOutcome>((resolve) => {
+          finish = resolve;
+          input.onEvent?.({ type: "worker.started" });
+          markRunStarted();
+        }),
+    );
+    const service = buildAutomationService(
+      { ...config, inngestDev: true },
+      {
+        createWorker: vi.fn(() => ({ run })) as unknown as (
+          workerConfig: BrowserbaseWorkerConfig,
+        ) => BrowserbaseAutomationWorker,
+        log: vi.fn(),
+        randomUUID: () => "11111111-1111-4111-8111-111111111111",
+        registerInngest: vi.fn((_app, execute: InngestRunExecutor) => {
+          inngestExecute = execute;
+        }),
+      },
+    );
+    const directRun = service.app.inject({
+      method: "POST",
+      url: "/v1/run",
+      headers: authorizedHeaders(),
+      payload: requestBody,
+    });
+    await runStarted;
+
+    const admission = await inngestExecute({ workflow: { schemaVersion: "1.2" } });
+
+    expect(admission).toEqual({ accepted: false, code: "at_capacity" });
+    finish(completedOutcome);
+    await directRun;
+    await service.shutdown();
+  });
+
   it("serves unauthenticated liveness and readiness checks", async () => {
     const { service } = fixture();
 
@@ -261,6 +325,7 @@ describe("automation service contract", () => {
         throw new Error("private-log-transport-error");
       },
       randomUUID: () => "11111111-1111-4111-8111-111111111111",
+      registerInngest: vi.fn(),
     });
 
     const response = await service.app.inject({

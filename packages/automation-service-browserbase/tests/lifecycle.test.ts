@@ -7,10 +7,12 @@ import type {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildAutomationService } from "../src/app.js";
 import type { AutomationServiceConfig } from "../src/config.js";
+import type { InngestRunExecutor } from "../src/inngest.js";
 
 const serviceToken = "service-token-that-is-at-least-32-bytes";
 const config: AutomationServiceConfig = {
   host: "127.0.0.1",
+  inngestDev: false,
   port: 8080,
   maxConcurrentRuns: 1,
   retryAfterSeconds: 1,
@@ -32,6 +34,7 @@ function serviceWith(run: (input: BrowserbaseRunInput) => Promise<BrowserbaseRun
     ) => BrowserbaseAutomationWorker,
     log: vi.fn(),
     randomUUID: () => "11111111-1111-4111-8111-111111111111",
+    registerInngest: vi.fn(),
   });
 }
 
@@ -48,6 +51,44 @@ afterEach(() => {
 });
 
 describe("automation service lifecycle", () => {
+  it("aborts an active Inngest worker during shutdown", async () => {
+    let inngestExecute!: InngestRunExecutor;
+    let observedSignal: AbortSignal | undefined;
+    let markRunStarted!: () => void;
+    const runStarted = new Promise<void>((resolve) => {
+      markRunStarted = resolve;
+    });
+    const run = vi.fn(
+      (input: BrowserbaseRunInput) =>
+        new Promise<BrowserbaseRunOutcome>((resolve) => {
+          observedSignal = input.signal;
+          markRunStarted();
+          input.signal?.addEventListener("abort", () => resolve(cancelledOutcome), { once: true });
+        }),
+    );
+    const service = buildAutomationService(
+      { ...config, inngestDev: true },
+      {
+        createWorker: vi.fn(() => ({ run })) as unknown as (
+          workerConfig: BrowserbaseWorkerConfig,
+        ) => BrowserbaseAutomationWorker,
+        log: vi.fn(),
+        randomUUID: () => "11111111-1111-4111-8111-111111111111",
+        registerInngest: vi.fn((_app, execute: InngestRunExecutor) => {
+          inngestExecute = execute;
+        }),
+      },
+    );
+    const inngestRun = inngestExecute({ workflow: { schemaVersion: "1.2" } });
+    await runStarted;
+
+    const shutdown = service.shutdown();
+
+    expect(observedSignal?.aborted).toBe(true);
+    await expect(inngestRun).resolves.toEqual({ accepted: true, outcome: cancelledOutcome });
+    await shutdown;
+  });
+
   it("cancels an active run when the streaming client disconnects", async () => {
     let cancellationObserved!: () => void;
     const wasCancelled = new Promise<void>((resolve) => {
@@ -140,6 +181,7 @@ describe("automation service lifecycle", () => {
         ) => BrowserbaseAutomationWorker,
         log: vi.fn(),
         randomUUID: () => "11111111-1111-4111-8111-111111111111",
+        registerInngest: vi.fn(),
       },
     );
     await service.app.listen({ host: "127.0.0.1", port: 0 });

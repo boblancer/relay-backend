@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed POC. This design is intentionally local-only and does not supersede ADR 0005.
-The current stateless `POST /v1/run` service remains the supported runtime until this
-POC is implemented and evaluated.
+Implemented POC. This integration is intentionally local-only and does not supersede
+ADR 0005. The stateless `POST /v1/run` service remains the supported runtime while this
+POC is evaluated.
 
 If the POC is promoted to a durable or cloud-backed feature, write ADR 0006 before
 adding production routes, credentials, or operational guarantees.
@@ -135,8 +135,9 @@ package-local OpenAPI contract remain unchanged.
 
 The Inngest Fastify adapter owns `/api/inngest` only when `INNGEST_DEV=1`; without that
 exact value the route is absent. Any other non-empty value fails service configuration.
-The route is not added to the caller-facing OpenAPI contract. General Fastify request
-and header logging remains disabled.
+The opt-in also requires a loopback `AUTOMATION_HOST` because local development mode
+does not verify Cloud signatures. The route is not added to the caller-facing OpenAPI
+contract. General Fastify request and header logging remains disabled.
 
 Shutdown uses the existing service lifecycle: readiness becomes unavailable, every
 direct or Inngest worker is aborted, and Browserbase cleanup is allowed the configured
@@ -157,6 +158,7 @@ grace period.
 ```bash
 export BROWSERBASE_API_KEY="your-browserbase-api-key"
 export AUTOMATION_SERVICE_TOKEN="$(openssl rand -hex 32)"
+export AUTOMATION_HOST="127.0.0.1"
 export INNGEST_DEV=1
 npm run dev --prefix packages/automation-service-browserbase
 ```

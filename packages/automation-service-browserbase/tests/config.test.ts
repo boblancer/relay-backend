@@ -12,6 +12,7 @@ describe("loadServiceConfig", () => {
       host: "0.0.0.0",
       port: 8080,
       maxConcurrentRuns: 1,
+      inngestDev: false,
       retryAfterSeconds: 1,
       shutdownGraceMs: 30_000,
       serviceToken: "t".repeat(32),
@@ -23,6 +24,19 @@ describe("loadServiceConfig", () => {
         useProxy: false,
         verified: false,
       },
+    });
+  });
+
+  it("treats an empty local Inngest opt-in as disabled", () => {
+    expect(loadServiceConfig({ ...requiredEnvironment, INNGEST_DEV: "" })).toMatchObject({
+      inngestDev: false,
+    });
+  });
+
+  it("defaults the local Inngest POC to the loopback interface", () => {
+    expect(loadServiceConfig({ ...requiredEnvironment, INNGEST_DEV: "1" })).toMatchObject({
+      host: "127.0.0.1",
+      inngestDev: true,
     });
   });
 
@@ -40,10 +54,12 @@ describe("loadServiceConfig", () => {
         BROWSERBASE_REGION: "eu-central-1",
         BROWSERBASE_USE_PROXY: "true",
         BROWSERBASE_VERIFIED: "true",
+        INNGEST_DEV: "1",
         PORT: "9000",
       }),
     ).toMatchObject({
       host: "127.0.0.1",
+      inngestDev: true,
       maxConcurrentRuns: 3,
       port: 9000,
       retryAfterSeconds: 5,
@@ -71,6 +87,11 @@ describe("loadServiceConfig", () => {
     [{ ...requiredEnvironment, AUTOMATION_MAX_CONCURRENT_RUNS: "1.5" }, "invalid_server_configuration"],
     [{ ...requiredEnvironment, AUTOMATION_RUN_TIMEOUT_MS: "600001" }, "invalid_server_configuration"],
     [{ ...requiredEnvironment, AUTOMATION_STEP_TIMEOUT_MS: "60001" }, "invalid_server_configuration"],
+    [{ ...requiredEnvironment, INNGEST_DEV: "true" }, "invalid_server_configuration"],
+    [
+      { ...requiredEnvironment, AUTOMATION_HOST: "0.0.0.0", INNGEST_DEV: "1" },
+      "invalid_server_configuration",
+    ],
     [{ ...requiredEnvironment, BROWSERBASE_USE_PROXY: "yes" }, "invalid_browserbase_configuration"],
     [{ ...requiredEnvironment, BROWSERBASE_REGION: "moon-1" }, "invalid_browserbase_configuration"],
   ])("rejects invalid configuration without exposing its value", (environment, expectedCode) => {

@@ -17,6 +17,7 @@ export class ConfigurationError extends Error {
 
 export interface AutomationServiceConfig {
   host: string;
+  inngestDev: boolean;
   port: number;
   maxConcurrentRuns: number;
   retryAfterSeconds: number;
@@ -31,6 +32,7 @@ const regions = new Set<BrowserbaseRegion>([
   "eu-central-1",
   "ap-southeast-1",
 ]);
+const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
 
 function requiredSecret(
   value: string | undefined,
@@ -63,6 +65,12 @@ function strictBoolean(value: string | undefined): boolean {
   throw new ConfigurationError("invalid_browserbase_configuration");
 }
 
+function strictOptIn(value: string | undefined): boolean {
+  if (value === undefined || value === "") return false;
+  if (value === "1") return true;
+  throw new ConfigurationError("invalid_server_configuration");
+}
+
 export function loadServiceConfig(environment: NodeJS.ProcessEnv): AutomationServiceConfig {
   const apiKey = requiredSecret(
     environment.BROWSERBASE_API_KEY,
@@ -77,9 +85,15 @@ export function loadServiceConfig(environment: NodeJS.ProcessEnv): AutomationSer
   if (!regions.has(region as BrowserbaseRegion)) {
     throw new ConfigurationError("invalid_browserbase_configuration");
   }
+  const inngestDev = strictOptIn(environment.INNGEST_DEV);
+  const host = environment.AUTOMATION_HOST?.trim() || (inngestDev ? "127.0.0.1" : "0.0.0.0");
+  if (inngestDev && !loopbackHosts.has(host)) {
+    throw new ConfigurationError("invalid_server_configuration");
+  }
 
   return {
-    host: environment.AUTOMATION_HOST?.trim() || "0.0.0.0",
+    host,
+    inngestDev,
     port: boundedInteger(environment.PORT, 8080, 1, 65_535),
     maxConcurrentRuns: boundedInteger(
       environment.AUTOMATION_MAX_CONCURRENT_RUNS,

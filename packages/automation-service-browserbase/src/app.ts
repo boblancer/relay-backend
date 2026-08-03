@@ -12,6 +12,11 @@ import Fastify, {
   type FastifyRequest,
 } from "fastify";
 import type { AutomationServiceConfig } from "./config.js";
+import {
+  registerInngestFunctions,
+  type InngestAdmissionCode,
+  type InngestRunExecutor,
+} from "./inngest.js";
 
 const maximumRequestBytes = 1_048_576;
 const heartbeatIntervalMs = 15_000;
@@ -36,6 +41,7 @@ export interface AutomationServiceDependencies {
   createWorker(config: BrowserbaseWorkerConfig): RunWorker;
   log(record: SafeLogRecord): void;
   randomUUID(): string;
+  registerInngest(app: FastifyInstance, execute: InngestRunExecutor): void;
 }
 
 export interface AutomationService {
@@ -53,6 +59,7 @@ const productionDependencies: AutomationServiceDependencies = {
   createWorker: (config) => new BrowserbaseAutomationWorker(config),
   log: (record) => process.stdout.write(`${JSON.stringify(record)}\n`),
   randomUUID: nodeRandomUUID,
+  registerInngest: registerInngestFunctions,
 };
 
 const runRequestSchema = {
@@ -128,6 +135,29 @@ export function buildAutomationService(
     }
   };
 
+  const admissionCode = (): InngestAdmissionCode | undefined => {
+    if (shuttingDown) return "shutting_down";
+    if (activeRuns.size >= config.maxConcurrentRuns) return "at_capacity";
+    return undefined;
+  };
+
+  const startManagedRun = (
+    input: Omit<BrowserbaseRunInput, "signal">,
+    controller = new AbortController(),
+  ) => {
+    const runPromise = Promise.resolve()
+      .then(() => worker.run({ ...input, signal: controller.signal }))
+      .finally(() => activeRuns.delete(controller));
+    activeRuns.set(controller, runPromise);
+    return runPromise;
+  };
+
+  const executeInngestRun: InngestRunExecutor = async (input) => {
+    const code = admissionCode();
+    if (code) return { accepted: false, code };
+    return { accepted: true, outcome: await startManagedRun(input) };
+  };
+
   app.setErrorHandler((error, _request, reply) => {
     const status =
       typeof error === "object" && error !== null && "statusCode" in error
@@ -184,10 +214,11 @@ export function buildAutomationService(
     async (request, reply) => {
       const runId = dependencies.randomUUID();
       reply.header("X-Run-Id", runId);
-      if (shuttingDown) {
+      const code = admissionCode();
+      if (code === "shutting_down") {
         return reply.status(503).send(safeError("shutting_down", "The service is shutting down."));
       }
-      if (activeRuns.size >= config.maxConcurrentRuns) {
+      if (code === "at_capacity") {
         return reply
           .header("Retry-After", String(config.retryAfterSeconds))
           .status(429)
@@ -230,13 +261,11 @@ export function buildAutomationService(
       const input: BrowserbaseRunInput = {
         workflow: request.body.workflow,
         parameterValues: request.body.parameterValues ?? {},
-        signal: controller.signal,
         onEvent,
         ...(request.body.startStepId ? { startStepId: request.body.startStepId } : {}),
       };
 
-      const runPromise = worker.run(input);
-      activeRuns.set(controller, runPromise);
+      const runPromise = startManagedRun(input, controller);
       let outcome: BrowserbaseRunOutcome;
       try {
         outcome = await runPromise;
@@ -248,7 +277,6 @@ export function buildAutomationService(
           cleanupStatus: "incomplete",
         };
       } finally {
-        activeRuns.delete(controller);
         if (heartbeat) clearInterval(heartbeat);
         request.raw.removeListener("aborted", abortIfDisconnected);
       }
@@ -285,6 +313,10 @@ export function buildAutomationService(
       return reply;
     },
   );
+
+  if (config.inngestDev) {
+    dependencies.registerInngest(app, executeInngestRun);
+  }
 
   return {
     app,

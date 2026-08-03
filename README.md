@@ -91,6 +91,7 @@ docker compose down --volumes
 | `AUTOMATION_RUN_TIMEOUT_MS` | Run deadline, at most 10 minutes; defaults to `600000` |
 | `AUTOMATION_STEP_TIMEOUT_MS` | Step deadline, at most 60 seconds; defaults to `60000` |
 | `AUTOMATION_SHUTDOWN_GRACE_MS` | Cancellation cleanup grace; defaults to `30000` |
+| `INNGEST_DEV` | Set exactly `1` with a loopback `AUTOMATION_HOST` to enable the local-only Inngest POC endpoint |
 
 No credentials are built into the application. Copy `.env.example` to the ignored
 `.env` file and replace the example password.
@@ -128,7 +129,9 @@ persist run state.
 is a separate Fastify process exposing authenticated `POST /v1/run`. Each request
 carries a full workflow and explicit parameter values and receives privacy-safe NDJSON
 events plus one terminal outcome. Client disconnect cancels the run. The process does
-not call the persistence API, use PostgreSQL, or retain run state.
+not call the persistence API, use PostgreSQL, or retain run state. An opt-in local
+Inngest Dev Server function reuses the same worker, capacity, and shutdown lifecycle for
+synthetic POC events without changing the caller-facing OpenAPI contract.
 
 Successful idempotency records are retained indefinitely. A replay with the same key,
 method, path, and validated canonical JSON returns the original response even if the

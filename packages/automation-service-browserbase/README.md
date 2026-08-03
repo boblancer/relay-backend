@@ -1,8 +1,9 @@
 # @relay/automation-service-browserbase
 
-Private Fastify service for executing one finalized Relay workflow per authenticated
-HTTP request. It imports `@relay/automation-worker-browserbase` directly and has no
-dependency on FastAPI or PostgreSQL.
+Private Fastify service for executing finalized Relay workflows through authenticated
+HTTP requests, plus an opt-in local Inngest POC. It imports
+`@relay/automation-worker-browserbase` directly and has no dependency on FastAPI or
+PostgreSQL.
 
 ## Setup
 
@@ -63,6 +64,37 @@ capacity.
 
 The authoritative service contract is [`openapi.yaml`](openapi.yaml).
 
+## Local Inngest POC
+
+Set `INNGEST_DEV=1` to add the SDK-owned `/api/inngest` endpoint to the existing
+Fastify listener. This local-only POC registers one `browserbase-automation-run`
+function for `relay/automation.run.requested` events. It uses the same worker, local
+capacity, timeout, and shutdown cancellation as `POST /v1/run`, but returns only a safe
+terminal outcome to Inngest.
+
+Start the service in development mode:
+
+```bash
+export BROWSERBASE_API_KEY="your-browserbase-api-key"
+export AUTOMATION_SERVICE_TOKEN="$(openssl rand -hex 32)"
+export AUTOMATION_HOST="127.0.0.1"
+export INNGEST_DEV=1
+npm run dev --prefix packages/automation-service-browserbase
+```
+
+In a second terminal, start the local Dev Server:
+
+```bash
+npx inngest-cli@latest dev -u http://localhost:8080/api/inngest
+```
+
+Open the local Inngest UI, select `browserbase-automation-run`, choose **Invoke**, and
+provide `workflow`, optional `startStepId`, and optional string-valued
+`parameterValues`. The Dev Server displays event bodies, so use only synthetic
+workflows and non-sensitive parameter values. No Inngest account or key is required.
+Cloud deployment, payload encryption, scheduling, status lookup, and automatic retries
+are outside this POC.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -80,6 +112,7 @@ The authoritative service contract is [`openapi.yaml`](openapi.yaml).
 | `BROWSERBASE_REGION` | `us-west-2` | Browserbase session region |
 | `BROWSERBASE_USE_PROXY` | `false` | Managed proxy opt-in |
 | `BROWSERBASE_VERIFIED` | `false` | Verified mode opt-in |
+| `INNGEST_DEV` | unset | Set exactly `1` to register the local `/api/inngest` POC endpoint; requires a loopback host |
 
 The service disables general Fastify request logging. Its own JSON logs contain only a
 generated run ID, fixed lifecycle state, duration, and safe outcome code. Workflow

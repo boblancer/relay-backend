@@ -258,6 +258,8 @@ relay_backend/
 ├── .gitignore                        Local and generated-file exclusions
 ├── alembic.ini                       Alembic paths, database default, and logging
 ├── docs/
+│   ├── designs/
+│   │   └── inngest-browserbase-orchestration.md
 │   └── decisions/
 │       ├── 0001-postgresql-jsonb-persistence.md
 │       ├── 0002-shared-basic-authentication.md
@@ -282,8 +284,8 @@ relay_backend/
 │       ├── package-lock.json          Service dependency lockfile
 │       ├── openapi.yaml               Authoritative stateless run-service contract
 │       ├── README.md                  HTTP, configuration, privacy, and operations
-│       ├── src/                       Configuration, HTTP lifecycle, and process entry point
-│       └── tests/                     Contract, streaming, lifecycle, integration, and smoke tests
+│       ├── src/                       Configuration, HTTP lifecycle, local Inngest POC, and entry point
+│       └── tests/                     Contract, streaming, Inngest, lifecycle, integration, and smoke tests
 ├── migrations/
 │   ├── env.py                        Alembic online/offline runtime configuration
 │   ├── script.py.mako                Migration revision template
@@ -347,7 +349,9 @@ are package markers and contain no runtime behavior.
 | [`packages/automation-worker-browserbase/tests/`](packages/automation-worker-browserbase/tests/) | Proves worker lifecycle, cleanup, timeout, parameter, CLI, and privacy behavior without paid sessions by default. |
 | [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml) | Defines the independent `POST /v1/run` and health wire contract. |
 | [`packages/automation-service-browserbase/src/`](packages/automation-service-browserbase/src/) | Owns bearer authentication, request limits, NDJSON transport, local capacity, disconnect cancellation, and shutdown. |
+| [`packages/automation-service-browserbase/src/inngest.ts`](packages/automation-service-browserbase/src/inngest.ts) | Owns the opt-in local Inngest event validation, one-function registration, and safe terminal projection. |
 | [`packages/automation-service-browserbase/tests/`](packages/automation-service-browserbase/tests/) | Proves the service contract and worker integration without paid sessions by default. |
+| [`docs/designs/inngest-browserbase-orchestration.md`](docs/designs/inngest-browserbase-orchestration.md) | Defines the local-only Inngest POC boundary and deferred production decisions. |
 
 ## Where to make common changes
 
@@ -367,6 +371,7 @@ are package markers and contain no runtime behavior.
 | Change background automation behavior | [`packages/automation-core/src/runner.ts`](packages/automation-core/src/runner.ts) and [`execution.ts`](packages/automation-core/src/execution.ts) | Package tests, public exports, package README, and ADR 0003 boundaries. |
 | Change Browserbase run lifecycle | [`packages/automation-worker-browserbase/src/worker.ts`](packages/automation-worker-browserbase/src/worker.ts) | Worker tests, CLI output, package README, and ADR 0004 boundaries. |
 | Change the stateless execution API | [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml) | Service runtime, tests, README, and ADR 0005 boundaries. |
+| Change the local Inngest POC | [`packages/automation-service-browserbase/src/inngest.ts`](packages/automation-service-browserbase/src/inngest.ts) | Shared lifecycle tests, package README, POC design, and privacy assertions. |
 
 ## Invariants to preserve
 

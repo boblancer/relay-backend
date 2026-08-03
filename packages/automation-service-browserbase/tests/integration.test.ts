@@ -8,6 +8,7 @@ import { navigationWorkflow } from "./fixtures.js";
 const serviceToken = "service-token-that-is-at-least-32-bytes";
 const config: AutomationServiceConfig = {
   host: "127.0.0.1",
+  inngestDev: false,
   port: 8080,
   maxConcurrentRuns: 1,
   retryAfterSeconds: 1,
@@ -43,6 +44,7 @@ function integrationService() {
       }),
     log: vi.fn(),
     randomUUID: () => "22222222-2222-4222-8222-222222222222",
+    registerInngest: vi.fn(),
   });
   return { create, page, release, service };
 }
