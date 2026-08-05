@@ -2,20 +2,18 @@ import { describe, expect, it } from "vitest";
 import { ConfigurationError, loadServiceConfig } from "../src/config.js";
 
 const requiredEnvironment = {
-  AUTOMATION_SERVICE_TOKEN: "t".repeat(32),
   BROWSERBASE_API_KEY: "browserbase-key",
 };
 
 describe("loadServiceConfig", () => {
   it("uses conservative service and worker defaults", () => {
     expect(loadServiceConfig(requiredEnvironment)).toEqual({
-      host: "0.0.0.0",
+      host: "127.0.0.1",
       port: 8080,
-      maxConcurrentRuns: 1,
+      maxConcurrentRuns: 5,
       inngestDev: false,
       retryAfterSeconds: 1,
       shutdownGraceMs: 30_000,
-      serviceToken: "t".repeat(32),
       worker: {
         apiKey: "browserbase-key",
         region: "us-west-2",
@@ -76,12 +74,7 @@ describe("loadServiceConfig", () => {
   });
 
   it.each([
-    [{ BROWSERBASE_API_KEY: "key" }, "invalid_service_token"],
-    [{ ...requiredEnvironment, AUTOMATION_SERVICE_TOKEN: "too-short" }, "invalid_service_token"],
-    [
-      { ...requiredEnvironment, AUTOMATION_SERVICE_TOKEN: ` ${"t".repeat(32)}` },
-      "invalid_service_token",
-    ],
+    [{}, "invalid_browserbase_configuration"],
     [{ ...requiredEnvironment, BROWSERBASE_API_KEY: " " }, "invalid_browserbase_configuration"],
     [{ ...requiredEnvironment, PORT: "0" }, "invalid_server_configuration"],
     [{ ...requiredEnvironment, AUTOMATION_MAX_CONCURRENT_RUNS: "1.5" }, "invalid_server_configuration"],

@@ -5,7 +5,6 @@ import { buildAutomationService } from "../src/app.js";
 import type { AutomationServiceConfig } from "../src/config.js";
 import { navigationWorkflow } from "./fixtures.js";
 
-const serviceToken = "service-token-that-is-at-least-32-bytes";
 const config: AutomationServiceConfig = {
   host: "127.0.0.1",
   inngestDev: false,
@@ -13,7 +12,6 @@ const config: AutomationServiceConfig = {
   maxConcurrentRuns: 1,
   retryAfterSeconds: 1,
   shutdownGraceMs: 30_000,
-  serviceToken,
   worker: { apiKey: "browserbase-key" },
 };
 
@@ -50,6 +48,49 @@ function integrationService() {
 }
 
 describe("automation HTTP and worker integration", () => {
+  it("runs an accepted batch through the real worker with provider fakes", async () => {
+    const { create, release, service } = integrationService();
+    const workflow = navigationWorkflow();
+    const secondWorkflow = {
+      ...workflow,
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "Private second workflow",
+    };
+
+    const created = await service.app.inject({
+      method: "POST",
+      url: "/v1/batches",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      payload: { runs: [{ workflow }, { workflow: secondWorkflow }] },
+    });
+    const batchId = created.json().batchId as string;
+
+    await vi.waitFor(async () => {
+      const polled = await service.app.inject({
+        method: "GET",
+        url: `/v1/batches/${batchId}`,
+        headers: {
+          accept: "application/json",
+        },
+      });
+      expect(polled.json().runs.map((run: { status: string }) => run.status)).toEqual([
+        "completed",
+        "completed",
+      ]);
+      expect(polled.body).not.toMatch(
+        /example\.com|Private second workflow|private-provider|private-recording-session-id/,
+      );
+    });
+
+    expect(created.statusCode).toBe(202);
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledTimes(2);
+    await service.shutdown();
+  });
+
   it("rejects invalid workflow preflight without a paid session", async () => {
     const { create, service } = integrationService();
 
@@ -58,7 +99,6 @@ describe("automation HTTP and worker integration", () => {
       url: "/v1/run",
       headers: {
         accept: "application/x-ndjson",
-        authorization: `Bearer ${serviceToken}`,
         "content-type": "application/json",
       },
       payload: { workflow: { ...navigationWorkflow(), status: "draft" } },
@@ -66,6 +106,30 @@ describe("automation HTTP and worker integration", () => {
 
     expect(response.statusCode).toBe(422);
     expect(response.json()).toMatchObject({ error: { code: "workflow_not_complete" } });
+    expect(create).not.toHaveBeenCalled();
+    await service.shutdown();
+  });
+
+  it("rejects schema 1.2 with a safe 422 before a paid session", async () => {
+    const { create, service } = integrationService();
+
+    const response = await service.app.inject({
+      method: "POST",
+      url: "/v1/run",
+      headers: {
+        accept: "application/x-ndjson",
+        "content-type": "application/json",
+      },
+      payload: { workflow: { ...navigationWorkflow(), schemaVersion: "1.2" } },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toEqual({
+      error: {
+        code: "invalid_workflow",
+        message: "The automation run input is invalid.",
+      },
+    });
     expect(create).not.toHaveBeenCalled();
     await service.shutdown();
   });
@@ -78,7 +142,6 @@ describe("automation HTTP and worker integration", () => {
       url: "/v1/run",
       headers: {
         accept: "application/x-ndjson",
-        authorization: `Bearer ${serviceToken}`,
         "content-type": "application/json",
       },
       payload: { workflow: navigationWorkflow() },

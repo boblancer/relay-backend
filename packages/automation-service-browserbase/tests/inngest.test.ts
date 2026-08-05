@@ -59,7 +59,7 @@ describe("minimal Inngest automation function", () => {
     }));
     const step = immediateStep();
     const eventData = {
-      workflow: { schemaVersion: "1.2", privateUrl: "https://private.example" },
+      workflow: { schemaVersion: "1.3", privateUrl: "https://private.example" },
       startStepId: "start-step",
       parameterValues: { fill: "private-value" },
     };
@@ -106,7 +106,7 @@ describe("minimal Inngest automation function", () => {
       const execute = vi.fn<InngestRunExecutor>(async () => ({ accepted: false, code }));
 
       const outcome = await runBrowserbaseAutomationEvent(
-        { workflow: { schemaVersion: "1.2" } },
+        { workflow: { schemaVersion: "1.3" } },
         immediateStep().run,
         execute,
       );
@@ -144,7 +144,7 @@ describe("minimal Inngest automation function", () => {
     }));
 
     const outcome = await runBrowserbaseAutomationEvent(
-      { workflow: { schemaVersion: "1.2" } },
+      { workflow: { schemaVersion: "1.3" } },
       immediateStep().run,
       execute,
     );
@@ -164,7 +164,7 @@ describe("minimal Inngest automation function", () => {
     });
 
     const outcome = await runBrowserbaseAutomationEvent(
-      { workflow: { schemaVersion: "1.2" } },
+      { workflow: { schemaVersion: "1.3" } },
       immediateStep().run,
       execute,
     );

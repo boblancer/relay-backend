@@ -16,7 +16,6 @@ const config: AutomationServiceConfig = {
   maxConcurrentRuns: 1,
   retryAfterSeconds: 2,
   shutdownGraceMs: 30_000,
-  serviceToken: "service-token-that-is-at-least-32-bytes",
   worker: {
     apiKey: "private-browserbase-key",
     region: "us-west-2",
@@ -28,7 +27,7 @@ const config: AutomationServiceConfig = {
 };
 
 const requestBody = {
-  workflow: { schemaVersion: "1.2", status: "complete" },
+  workflow: { schemaVersion: "1.3", status: "complete" },
   parameterValues: { fill: "private-parameter-value" },
 };
 
@@ -70,11 +69,27 @@ function fixture(
   return { createWorker, logs, registerInngest, run, service };
 }
 
-function authorizedHeaders(accept = "application/x-ndjson") {
+function runHeaders(accept = "application/x-ndjson") {
   return {
     accept,
-    authorization: `Bearer ${config.serviceToken}`,
     "content-type": "application/json",
+  };
+}
+
+function batchHeaders() {
+  return {
+    accept: "application/json",
+    "content-type": "application/json",
+  };
+}
+
+function batchWorkflow(index: number) {
+  return {
+    schemaVersion: "1.3",
+    id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    status: "complete",
+    privateName: `private-workflow-${index}`,
+    privateUrl: `https://private-${index}.example`,
   };
 }
 
@@ -130,12 +145,12 @@ describe("automation service contract", () => {
     const directRun = service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: requestBody,
     });
     await runStarted;
 
-    const admission = await inngestExecute({ workflow: { schemaVersion: "1.2" } });
+    const admission = await inngestExecute({ workflow: { schemaVersion: "1.3" } });
 
     expect(admission).toEqual({ accepted: false, code: "at_capacity" });
     finish(completedOutcome);
@@ -161,18 +176,26 @@ describe("automation service contract", () => {
   });
 
   it.each([
-    [{}, 401, "unauthorized"],
-    [{ authorization: "Bearer wrong-token", accept: "application/x-ndjson" }, 401, "unauthorized"],
-    [{ authorization: `Bearer ${config.serviceToken}`, accept: "application/json" }, 406, "not_acceptable"],
+    [{ accept: "application/x-ndjson", "content-type": "application/json" }, 200, undefined],
     [
       {
-        authorization: `Bearer ${config.serviceToken}`,
+        accept: "application/x-ndjson",
+        authorization: "Bearer arbitrary-ignored-token",
+        "content-type": "application/json",
+      },
+      200,
+      undefined,
+    ],
+    [{ accept: "application/json", "content-type": "application/json" }, 406, "not_acceptable"],
+    [
+      {
         accept: "application/x-ndjson;q=0",
+        "content-type": "application/json",
       },
       406,
       "not_acceptable",
     ],
-  ])("rejects unauthorized or incompatible callers", async (headers, statusCode, code) => {
+  ])("allows unauthenticated callers while enforcing media negotiation", async (headers, statusCode, code) => {
     const { service } = fixture();
     const response = await service.app.inject({
       method: "POST",
@@ -182,7 +205,7 @@ describe("automation service contract", () => {
     });
 
     expect(response.statusCode).toBe(statusCode);
-    expect(response.json()).toMatchObject({ error: { code } });
+    if (code) expect(response.json()).toMatchObject({ error: { code } });
     expect(response.body).not.toMatch(/private-parameter-value|private-browserbase-key/);
     await service.shutdown();
   });
@@ -194,7 +217,6 @@ describe("automation service contract", () => {
       url: "/v1/run",
       headers: {
         accept: "application/x-ndjson",
-        authorization: `Bearer ${config.serviceToken}`,
         "content-type": "text/plain",
       },
       payload: "private-body",
@@ -202,7 +224,7 @@ describe("automation service contract", () => {
     const extraField = await service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: { ...requestBody, provider: { verified: true } },
     });
 
@@ -218,7 +240,7 @@ describe("automation service contract", () => {
     const response = await service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: { workflow: { padding: `oversized-secret-${"x".repeat(1_048_576)}` } },
     });
 
@@ -240,7 +262,7 @@ describe("automation service contract", () => {
     const response = await service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: requestBody,
     });
 
@@ -261,7 +283,7 @@ describe("automation service contract", () => {
     const response = await service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: requestBody,
     });
     const lines = response.body.trim().split("\n").map((line) => JSON.parse(line));
@@ -284,6 +306,91 @@ describe("automation service contract", () => {
     await service.shutdown();
   });
 
+  it("logs privacy-safe direct-run step transitions", async () => {
+    const run = vi.fn(async (input: BrowserbaseRunInput) => {
+      const stepId = "private-step-id";
+      input.onEvent?.({ type: "worker.started" });
+      input.onEvent?.({ type: "step.started", stepId, stepIndex: 2 });
+      input.onEvent?.({ type: "step.phase", stepId, stepIndex: 2, phase: "acting" });
+      input.onEvent?.({
+        type: "step.skipped",
+        stepId,
+        stepIndex: 2,
+        reason: "redundant-option-click",
+      });
+      input.onEvent?.({ type: "step.completed", stepId, stepIndex: 2, durationMs: 7 });
+      input.onEvent?.({
+        type: "step.failed",
+        stepId,
+        stepIndex: 2,
+        phase: "waiting",
+        diagnostic: {
+          message: "private-diagnostic-message",
+          attempts: [{ kind: "private-locator-kind", reason: "private-attempt-reason" }],
+        },
+      });
+      input.onEvent?.({ type: "step.cancelled", stepId, stepIndex: 2 });
+      return completedOutcome;
+    });
+    const { logs, service } = fixture(run);
+
+    const response = await service.app.inject({
+      method: "POST",
+      url: "/v1/run",
+      headers: runHeaders(),
+      payload: requestBody,
+    });
+    const stepLogs = logs.filter((record) => record.event === "run.step");
+
+    expect(response.statusCode).toBe(200);
+    expect(stepLogs).toEqual([
+      {
+        event: "run.step",
+        runId: "11111111-1111-4111-8111-111111111111",
+        stepIndex: 2,
+        status: "started",
+      },
+      {
+        event: "run.step",
+        runId: "11111111-1111-4111-8111-111111111111",
+        stepIndex: 2,
+        status: "running",
+        phase: "acting",
+      },
+      {
+        event: "run.step",
+        runId: "11111111-1111-4111-8111-111111111111",
+        stepIndex: 2,
+        status: "skipped",
+        reason: "redundant-option-click",
+      },
+      {
+        event: "run.step",
+        runId: "11111111-1111-4111-8111-111111111111",
+        stepIndex: 2,
+        status: "completed",
+        durationMs: 7,
+      },
+      {
+        event: "run.step",
+        runId: "11111111-1111-4111-8111-111111111111",
+        stepIndex: 2,
+        status: "failed",
+        phase: "waiting",
+      },
+      {
+        event: "run.step",
+        runId: "11111111-1111-4111-8111-111111111111",
+        stepIndex: 2,
+        status: "cancelled",
+      },
+    ]);
+    expect(JSON.stringify(logs)).not.toMatch(
+      /private-step-id|private-diagnostic-message|private-locator-kind|private-attempt-reason/,
+    );
+    await service.shutdown();
+  });
+
   it("converts an unexpected post-stream exception to a safe terminal outcome", async () => {
     const run = vi.fn(async (input: BrowserbaseRunInput) => {
       input.onEvent?.({ type: "worker.started" });
@@ -294,7 +401,7 @@ describe("automation service contract", () => {
     const response = await service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: requestBody,
     });
     const lines = response.body.trim().split("\n").map((line) => JSON.parse(line));
@@ -316,6 +423,7 @@ describe("automation service contract", () => {
     const createWorker = vi.fn(() => ({
       run: async (input: BrowserbaseRunInput) => {
         input.onEvent?.({ type: "worker.started" });
+        input.onEvent?.({ type: "step.started", stepId: "private-step-id", stepIndex: 0 });
         return completedOutcome;
       },
     })) as unknown as (workerConfig: BrowserbaseWorkerConfig) => BrowserbaseAutomationWorker;
@@ -331,7 +439,7 @@ describe("automation service contract", () => {
     const response = await service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: requestBody,
     });
     const terminal = response.body
@@ -370,7 +478,7 @@ describe("automation service contract", () => {
     const response = await service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: requestBody,
     });
     const terminal = response.body
@@ -399,7 +507,7 @@ describe("automation service contract", () => {
     const responsePromise = service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: requestBody,
     });
     await vi.advanceTimersByTimeAsync(15_000);
@@ -429,7 +537,7 @@ describe("automation service contract", () => {
     const first = service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: requestBody,
     });
     await new Promise((resolve) => setImmediate(resolve));
@@ -437,7 +545,7 @@ describe("automation service contract", () => {
     const second = await service.app.inject({
       method: "POST",
       url: "/v1/run",
-      headers: authorizedHeaders(),
+      headers: runHeaders(),
       payload: requestBody,
     });
     const readiness = await service.app.inject({ method: "GET", url: "/health/ready" });
@@ -449,6 +557,194 @@ describe("automation service contract", () => {
     expect(readiness.json()).toEqual({ status: "ok" });
     finish(completedOutcome);
     await first;
+    await service.shutdown();
+  });
+
+  it("creates a batch and polls privacy-safe progress without a GET content type", async () => {
+    let finish!: (outcome: BrowserbaseRunOutcome) => void;
+    const run = vi.fn(
+      (input: BrowserbaseRunInput) =>
+        new Promise<BrowserbaseRunOutcome>((resolve) => {
+          finish = resolve;
+          input.onEvent?.({ type: "worker.started" });
+          input.onEvent?.({ type: "run.started", totalSteps: 2 });
+          input.onEvent?.({
+            type: "step.skipped",
+            stepId: "private-step-id",
+            stepIndex: 0,
+            reason: "disabled",
+          });
+        }),
+    );
+    const { service } = fixture(run, { maxConcurrentRuns: 5 });
+
+    const created = await service.app.inject({
+      method: "POST",
+      url: "/v1/batches",
+      headers: batchHeaders(),
+      payload: { runs: [{ workflow: batchWorkflow(1) }] },
+    });
+    const batchId = created.json().batchId as string;
+    const progress = await service.app.inject({
+      method: "GET",
+      url: `/v1/batches/${batchId}`,
+      headers: {
+        accept: "application/json",
+      },
+    });
+
+    expect(created.statusCode).toBe(202);
+    expect(created.headers["cache-control"]).toBe("no-store");
+    expect(created.json()).toEqual({
+      batchId: "11111111-1111-4111-8111-111111111111",
+      runCount: 1,
+    });
+    expect(progress.statusCode).toBe(200);
+    expect(progress.headers["cache-control"]).toBe("no-store");
+    expect(progress.json()).toEqual({
+      batchId,
+      runs: [
+        {
+          workflowId: batchWorkflow(1).id,
+          status: "running",
+          currentStep: 1,
+          totalSteps: 2,
+        },
+      ],
+    });
+    expect(progress.body).not.toMatch(/private-workflow|private-1\.example|private-step-id/);
+
+    finish(completedOutcome);
+    await vi.waitFor(async () => {
+      const terminal = await service.app.inject({
+        method: "GET",
+        url: `/v1/batches/${batchId}`,
+        headers: {
+          accept: "application/json",
+        },
+      });
+      expect(terminal.json().runs[0].status).toBe("completed");
+    });
+    await service.shutdown();
+  });
+
+  it("shares five global slots across batch, direct, and Inngest runs", async () => {
+    const finishes: Array<(outcome: BrowserbaseRunOutcome) => void> = [];
+    let inngestExecute!: InngestRunExecutor;
+    const run = vi.fn(
+      (input: BrowserbaseRunInput) =>
+        new Promise<BrowserbaseRunOutcome>((resolve) => {
+          finishes.push(resolve);
+          input.onEvent?.({ type: "worker.started" });
+        }),
+    );
+    const service = buildAutomationService(
+      { ...config, inngestDev: true, maxConcurrentRuns: 5 },
+      {
+        createWorker: vi.fn(() => ({ run })) as unknown as (
+          workerConfig: BrowserbaseWorkerConfig,
+        ) => BrowserbaseAutomationWorker,
+        log: vi.fn(),
+        randomUUID: () => "44444444-4444-4444-8444-444444444444",
+        registerInngest: vi.fn((_app, execute: InngestRunExecutor) => {
+          inngestExecute = execute;
+        }),
+      },
+    );
+
+    const created = await service.app.inject({
+      method: "POST",
+      url: "/v1/batches",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      payload: {
+        runs: Array.from({ length: 6 }, (_, index) => ({ workflow: batchWorkflow(index + 1) })),
+      },
+    });
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(5));
+
+    const direct = await service.app.inject({
+      method: "POST",
+      url: "/v1/run",
+      headers: runHeaders(),
+      payload: requestBody,
+    });
+    const inngest = await inngestExecute({ workflow: batchWorkflow(10) });
+
+    expect(created.statusCode).toBe(202);
+    expect(direct.statusCode).toBe(429);
+    expect(inngest).toEqual({ accepted: false, code: "at_capacity" });
+
+    finishes[0]!(completedOutcome);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(6));
+    for (const finish of finishes.slice(1)) finish(completedOutcome);
+    await vi.waitFor(async () => {
+      const snapshot = await service.app.inject({
+        method: "GET",
+        url: `/v1/batches/${created.json().batchId}`,
+        headers: {
+          accept: "application/json",
+        },
+      });
+      expect(snapshot.json().runs.every((item: { status: string }) => item.status === "completed"))
+        .toBe(true);
+    });
+    await service.shutdown();
+  });
+
+  it("accepts unauthenticated batches and rejects malformed or unknown requests safely", async () => {
+    const { service } = fixture(undefined, { maxConcurrentRuns: 5 });
+    const withoutAuthorization = await service.app.inject({
+      method: "POST",
+      url: "/v1/batches",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      payload: { runs: [{ workflow: batchWorkflow(1) }] },
+    });
+    const malformed = await service.app.inject({
+      method: "POST",
+      url: "/v1/batches",
+      headers: batchHeaders(),
+      payload: { runs: [{ workflow: { ...batchWorkflow(1), schemaVersion: "1.2" } }] },
+    });
+    const empty = await service.app.inject({
+      method: "POST",
+      url: "/v1/batches",
+      headers: batchHeaders(),
+      payload: { runs: [] },
+    });
+    const tooMany = await service.app.inject({
+      method: "POST",
+      url: "/v1/batches",
+      headers: batchHeaders(),
+      payload: {
+        runs: Array.from({ length: 11 }, (_, index) => ({ workflow: batchWorkflow(index + 1) })),
+      },
+    });
+    const notAcceptable = await service.app.inject({
+      method: "POST",
+      url: "/v1/batches",
+      headers: { ...batchHeaders(), accept: "application/x-ndjson" },
+      payload: { runs: [{ workflow: batchWorkflow(1) }] },
+    });
+    const unknown = await service.app.inject({
+      method: "GET",
+      url: "/v1/batches/99999999-9999-4999-8999-999999999999",
+      headers: {
+        accept: "application/json",
+      },
+    });
+
+    expect(withoutAuthorization.statusCode).toBe(202);
+    expect(malformed.statusCode).toBe(400);
+    expect(empty.statusCode).toBe(400);
+    expect(tooMany.statusCode).toBe(400);
+    expect(notAcceptable.statusCode).toBe(406);
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toEqual({
+      error: { code: "batch_not_found", message: "The batch is unknown or expired." },
+    });
     await service.shutdown();
   });
 });

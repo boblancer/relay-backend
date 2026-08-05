@@ -10,11 +10,7 @@ smoke("Browserbase HTTP smoke", () => {
   it(
     "navigates through the stateless run endpoint",
     async () => {
-      const serviceToken = "browserbase-smoke-service-token-32-bytes";
-      const config = loadServiceConfig({
-        ...process.env,
-        AUTOMATION_SERVICE_TOKEN: serviceToken,
-      });
+      const config = loadServiceConfig(process.env);
       const service = buildAutomationService(config);
       try {
         const response = await service.app.inject({
@@ -22,7 +18,6 @@ smoke("Browserbase HTTP smoke", () => {
           url: "/v1/run",
           headers: {
             accept: "application/x-ndjson",
-            authorization: `Bearer ${serviceToken}`,
             "content-type": "application/json",
           },
           payload: { workflow: navigationWorkflow() },

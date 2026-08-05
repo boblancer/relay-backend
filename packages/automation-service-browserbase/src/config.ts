@@ -5,8 +5,7 @@ import type {
 
 export type ConfigurationErrorCode =
   | "invalid_browserbase_configuration"
-  | "invalid_server_configuration"
-  | "invalid_service_token";
+  | "invalid_server_configuration";
 
 export class ConfigurationError extends Error {
   constructor(readonly code: ConfigurationErrorCode) {
@@ -22,7 +21,6 @@ export interface AutomationServiceConfig {
   maxConcurrentRuns: number;
   retryAfterSeconds: number;
   shutdownGraceMs: number;
-  serviceToken: string;
   worker: BrowserbaseWorkerConfig;
 }
 
@@ -76,17 +74,12 @@ export function loadServiceConfig(environment: NodeJS.ProcessEnv): AutomationSer
     environment.BROWSERBASE_API_KEY,
     "invalid_browserbase_configuration",
   );
-  const serviceToken = requiredSecret(
-    environment.AUTOMATION_SERVICE_TOKEN,
-    "invalid_service_token",
-    32,
-  );
   const region = environment.BROWSERBASE_REGION ?? "us-west-2";
   if (!regions.has(region as BrowserbaseRegion)) {
     throw new ConfigurationError("invalid_browserbase_configuration");
   }
   const inngestDev = strictOptIn(environment.INNGEST_DEV);
-  const host = environment.AUTOMATION_HOST?.trim() || (inngestDev ? "127.0.0.1" : "0.0.0.0");
+  const host = environment.AUTOMATION_HOST?.trim() || "127.0.0.1";
   if (inngestDev && !loopbackHosts.has(host)) {
     throw new ConfigurationError("invalid_server_configuration");
   }
@@ -97,7 +90,7 @@ export function loadServiceConfig(environment: NodeJS.ProcessEnv): AutomationSer
     port: boundedInteger(environment.PORT, 8080, 1, 65_535),
     maxConcurrentRuns: boundedInteger(
       environment.AUTOMATION_MAX_CONCURRENT_RUNS,
-      1,
+      5,
       1,
       1_000,
     ),
@@ -113,7 +106,6 @@ export function loadServiceConfig(environment: NodeJS.ProcessEnv): AutomationSer
       1,
       300_000,
     ),
-    serviceToken,
     worker: {
       apiKey,
       ...(environment.BROWSERBASE_PROJECT_ID

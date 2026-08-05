@@ -1,4 +1,4 @@
-import { createHash, randomUUID as nodeRandomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID as nodeRandomUUID } from "node:crypto";
 import {
   BrowserbaseAutomationWorker,
   type BrowserbaseRunInput,
@@ -11,6 +11,10 @@ import Fastify, {
   type FastifyReply,
   type FastifyRequest,
 } from "fastify";
+import {
+  BatchCoordinator,
+  type BatchRunInput,
+} from "./batches/batch-coordinator.js";
 import type { AutomationServiceConfig } from "./config.js";
 import {
   registerInngestFunctions,
@@ -20,6 +24,9 @@ import {
 
 const maximumRequestBytes = 1_048_576;
 const heartbeatIntervalMs = 15_000;
+
+type StepPhase = Extract<BrowserbaseWorkerEvent, { type: "step.phase" }>["phase"];
+type StepSkipReason = Extract<BrowserbaseWorkerEvent, { type: "step.skipped" }>["reason"];
 
 export type SafeLogRecord =
   | { event: "run.started"; runId: string }
@@ -31,7 +38,16 @@ export type SafeLogRecord =
       code?: string;
       durationMs: number;
     }
-  | { event: "run.rejected"; runId: string; code: string };
+  | { event: "run.rejected"; runId: string; code: string }
+  | {
+      event: "run.step";
+      runId: string;
+      stepIndex: number;
+      status: "started" | "running" | "skipped" | "completed" | "failed" | "cancelled";
+      phase?: StepPhase;
+      reason?: StepSkipReason;
+      durationMs?: number;
+    };
 
 interface RunWorker {
   run(input: BrowserbaseRunInput): Promise<BrowserbaseRunOutcome>;
@@ -55,6 +71,12 @@ interface RunRequestBody {
   parameterValues?: Readonly<Record<string, string>>;
 }
 
+interface BatchRequestBody {
+  runs: Array<{
+    workflow: object & { id: string; schemaVersion: "1.3"; status: "complete" };
+  }>;
+}
+
 const productionDependencies: AutomationServiceDependencies = {
   createWorker: (config) => new BrowserbaseAutomationWorker(config),
   log: (record) => process.stdout.write(`${JSON.stringify(record)}\n`),
@@ -76,19 +98,47 @@ const runRequestSchema = {
   },
 } as const;
 
+const batchRequestSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["runs"],
+  properties: {
+    runs: {
+      type: "array",
+      minItems: 1,
+      maxItems: 10,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["workflow"],
+        properties: {
+          workflow: {
+            type: "object",
+            required: ["id", "schemaVersion", "status"],
+            properties: {
+              id: { type: "string", format: "uuid" },
+              schemaVersion: { const: "1.3" },
+              status: { const: "complete" },
+            },
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+const batchPathSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["batchId"],
+  properties: { batchId: { type: "string", format: "uuid" } },
+} as const;
+
 function safeError(code: string, message: string) {
   return { error: { code, message } };
 }
 
-function tokenMatches(header: string | undefined, expected: string): boolean {
-  const match = header?.match(/^Bearer\s+([^\s]+)$/i);
-  if (!match?.[1]) return false;
-  const providedDigest = createHash("sha256").update(match[1]).digest();
-  const expectedDigest = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(providedDigest, expectedDigest);
-}
-
-function acceptsNdjson(header: string | undefined): boolean {
+function acceptsMediaType(header: string | undefined, expected: string): boolean {
   if (!header) return true;
   return header.split(",").some((item) => {
     const [rawMediaType, ...parameters] = item.split(";");
@@ -98,11 +148,16 @@ function acceptsNdjson(header: string | undefined): boolean {
       .find((parameter) => parameter.startsWith("q="));
     const quality = qualityParameter ? Number(qualityParameter.slice(2)) : 1;
     const mediaTypeMatches =
-      mediaType === "*/*" ||
-      mediaType === "application/*" ||
-      mediaType === "application/x-ndjson";
+      mediaType === "*/*" || mediaType === "application/*" || mediaType === expected;
     return mediaTypeMatches && Number.isFinite(quality) && quality > 0 && quality <= 1;
   });
+}
+
+function hasJsonContentType(request: FastifyRequest): boolean {
+  return (
+    request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() ===
+    "application/json"
+  );
 }
 
 function writeLine(reply: FastifyReply, runId: string, value: object): void {
@@ -113,6 +168,52 @@ function writeLine(reply: FastifyReply, runId: string, value: object): void {
 
 function failureCode(outcome: BrowserbaseRunOutcome): string | undefined {
   return outcome.status === "failed" ? outcome.code : undefined;
+}
+
+function safeStepLogRecord(
+  runId: string,
+  event: BrowserbaseWorkerEvent,
+): SafeLogRecord | undefined {
+  switch (event.type) {
+    case "step.started":
+      return { event: "run.step", runId, stepIndex: event.stepIndex, status: "started" };
+    case "step.phase":
+      return {
+        event: "run.step",
+        runId,
+        stepIndex: event.stepIndex,
+        status: "running",
+        phase: event.phase,
+      };
+    case "step.skipped":
+      return {
+        event: "run.step",
+        runId,
+        stepIndex: event.stepIndex,
+        status: "skipped",
+        reason: event.reason,
+      };
+    case "step.completed":
+      return {
+        event: "run.step",
+        runId,
+        stepIndex: event.stepIndex,
+        status: "completed",
+        durationMs: event.durationMs,
+      };
+    case "step.failed":
+      return {
+        event: "run.step",
+        runId,
+        stepIndex: event.stepIndex,
+        status: "failed",
+        phase: event.phase,
+      };
+    case "step.cancelled":
+      return { event: "run.step", runId, stepIndex: event.stepIndex, status: "cancelled" };
+    default:
+      return undefined;
+  }
 }
 
 export function buildAutomationService(
@@ -127,6 +228,7 @@ export function buildAutomationService(
   const worker = dependencies.createWorker(config.worker);
   const activeRuns = new Map<AbortController, Promise<BrowserbaseRunOutcome>>();
   let shuttingDown = false;
+  let notifyRunSettled = () => {};
   const safeLog = (record: SafeLogRecord) => {
     try {
       dependencies.log(record);
@@ -147,10 +249,19 @@ export function buildAutomationService(
   ) => {
     const runPromise = Promise.resolve()
       .then(() => worker.run({ ...input, signal: controller.signal }))
-      .finally(() => activeRuns.delete(controller));
+      .finally(() => {
+        activeRuns.delete(controller);
+        notifyRunSettled();
+      });
     activeRuns.set(controller, runPromise);
     return runPromise;
   };
+
+  const batchCoordinator = new BatchCoordinator({
+    randomUUID: dependencies.randomUUID,
+    tryStart: (input) => (admissionCode() ? undefined : startManagedRun(input)),
+  });
+  notifyRunSettled = () => batchCoordinator.drain();
 
   const executeInngestRun: InngestRunExecutor = async (input) => {
     const code = admissionCode();
@@ -172,7 +283,7 @@ export function buildAutomationService(
         .send(safeError("unsupported_media_type", "Content-Type must be application/json."));
     }
     if (status === 400) {
-      return reply.status(400).send(safeError("invalid_request", "The run request is invalid."));
+      return reply.status(400).send(safeError("invalid_request", "The request is invalid."));
     }
     return reply.status(500).send(safeError("internal", "The automation service failed."));
   });
@@ -183,34 +294,51 @@ export function buildAutomationService(
     return { status: "ok" };
   });
 
-  async function authorize(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    if (!tokenMatches(request.headers.authorization, config.serviceToken)) {
-      await reply
-        .header("WWW-Authenticate", "Bearer")
-        .status(401)
-        .send(safeError("unauthorized", "Authentication is required."));
-      return;
-    }
-    const contentType = request.headers["content-type"]
-      ?.split(";", 1)[0]
-      ?.trim()
-      .toLowerCase();
-    if (contentType !== "application/json") {
+  async function validateRunMedia(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    if (!hasJsonContentType(request)) {
       await reply
         .status(415)
         .send(safeError("unsupported_media_type", "Content-Type must be application/json."));
       return;
     }
-    if (!acceptsNdjson(request.headers.accept)) {
+    if (!acceptsMediaType(request.headers.accept, "application/x-ndjson")) {
       await reply
         .status(406)
         .send(safeError("not_acceptable", "Accept must allow application/x-ndjson."));
     }
   }
 
+  async function validateBatchCreateMedia(
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<void> {
+    if (!hasJsonContentType(request)) {
+      await reply
+        .status(415)
+        .send(safeError("unsupported_media_type", "Content-Type must be application/json."));
+      return;
+    }
+    if (!acceptsMediaType(request.headers.accept, "application/json")) {
+      await reply
+        .status(406)
+        .send(safeError("not_acceptable", "Accept must allow application/json."));
+    }
+  }
+
+  async function validateBatchPollMedia(
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<void> {
+    if (!acceptsMediaType(request.headers.accept, "application/json")) {
+      await reply
+        .status(406)
+        .send(safeError("not_acceptable", "Accept must allow application/json."));
+    }
+  }
+
   app.post<{ Body: RunRequestBody }>(
     "/v1/run",
-    { onRequest: authorize, schema: { body: runRequestSchema } },
+    { onRequest: validateRunMedia, schema: { body: runRequestSchema } },
     async (request, reply) => {
       const runId = dependencies.randomUUID();
       reply.header("X-Run-Id", runId);
@@ -256,6 +384,8 @@ export function buildAutomationService(
 
       const onEvent = (event: BrowserbaseWorkerEvent) => {
         startStream();
+        const stepLog = safeStepLogRecord(runId, event);
+        if (stepLog) safeLog(stepLog);
         writeLine(reply, runId, event);
       };
       const input: BrowserbaseRunInput = {
@@ -314,6 +444,42 @@ export function buildAutomationService(
     },
   );
 
+  app.post<{ Body: BatchRequestBody }>(
+    "/v1/batches",
+    { onRequest: validateBatchCreateMedia, schema: { body: batchRequestSchema } },
+    async (request, reply) => {
+      if (shuttingDown) {
+        return reply.status(503).send(safeError("shutting_down", "The service is shutting down."));
+      }
+      const inputs: BatchRunInput[] = request.body.runs.map(({ workflow }) => ({
+        workflowId: workflow.id,
+        workflow,
+      }));
+      const created = batchCoordinator.createBatch(inputs);
+      if (!created) {
+        return reply
+          .status(429)
+          .send(safeError("batch_capacity", "The service is at batch capacity."));
+      }
+      return reply.header("Cache-Control", "no-store").status(202).send(created);
+    },
+  );
+
+  app.get<{ Params: { batchId: string } }>(
+    "/v1/batches/:batchId",
+    { onRequest: validateBatchPollMedia, schema: { params: batchPathSchema } },
+    async (request, reply) => {
+      const snapshot = batchCoordinator.getBatch(request.params.batchId);
+      if (!snapshot) {
+        return reply
+          .header("Cache-Control", "no-store")
+          .status(404)
+          .send(safeError("batch_not_found", "The batch is unknown or expired."));
+      }
+      return reply.header("Cache-Control", "no-store").send(snapshot);
+    },
+  );
+
   if (config.inngestDev) {
     dependencies.registerInngest(app, executeInngestRun);
   }
@@ -323,6 +489,7 @@ export function buildAutomationService(
     async shutdown() {
       if (shuttingDown) return;
       shuttingDown = true;
+      batchCoordinator.stop();
       for (const controller of activeRuns.keys()) controller.abort();
       if (activeRuns.size) {
         let grace: NodeJS.Timeout | undefined;

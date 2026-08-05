@@ -9,7 +9,6 @@ import { buildAutomationService } from "../src/app.js";
 import type { AutomationServiceConfig } from "../src/config.js";
 import type { InngestRunExecutor } from "../src/inngest.js";
 
-const serviceToken = "service-token-that-is-at-least-32-bytes";
 const config: AutomationServiceConfig = {
   host: "127.0.0.1",
   inngestDev: false,
@@ -17,7 +16,6 @@ const config: AutomationServiceConfig = {
   maxConcurrentRuns: 1,
   retryAfterSeconds: 1,
   shutdownGraceMs: 1_000,
-  serviceToken,
   worker: { apiKey: "browserbase-key" },
 };
 
@@ -41,7 +39,6 @@ function serviceWith(run: (input: BrowserbaseRunInput) => Promise<BrowserbaseRun
 function headers() {
   return {
     accept: "application/x-ndjson",
-    authorization: `Bearer ${serviceToken}`,
     "content-type": "application/json",
   };
 }
@@ -51,6 +48,54 @@ afterEach(() => {
 });
 
 describe("automation service lifecycle", () => {
+  it("aborts five active batch runs and never starts queued work during shutdown", async () => {
+    const observedSignals: AbortSignal[] = [];
+    const run = vi.fn(
+      (input: BrowserbaseRunInput) =>
+        new Promise<BrowserbaseRunOutcome>((resolve) => {
+          observedSignals.push(input.signal!);
+          input.onEvent?.({ type: "worker.started" });
+          input.signal?.addEventListener("abort", () => resolve(cancelledOutcome), { once: true });
+        }),
+    );
+    const service = buildAutomationService(
+      { ...config, maxConcurrentRuns: 5 },
+      {
+        createWorker: vi.fn(() => ({ run })) as unknown as (
+          workerConfig: BrowserbaseWorkerConfig,
+        ) => BrowserbaseAutomationWorker,
+        log: vi.fn(),
+        randomUUID: () => "22222222-2222-4222-8222-222222222222",
+        registerInngest: vi.fn(),
+      },
+    );
+    const response = await service.app.inject({
+      method: "POST",
+      url: "/v1/batches",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      payload: {
+        runs: Array.from({ length: 6 }, (_, index) => ({
+          workflow: {
+            schemaVersion: "1.3",
+            id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+            status: "complete",
+          },
+        })),
+      },
+    });
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(5));
+
+    await service.shutdown();
+
+    expect(response.statusCode).toBe(202);
+    expect(run).toHaveBeenCalledTimes(5);
+    expect(observedSignals).toHaveLength(5);
+    expect(observedSignals.every((signal) => signal.aborted)).toBe(true);
+  });
+
   it("aborts an active Inngest worker during shutdown", async () => {
     let inngestExecute!: InngestRunExecutor;
     let observedSignal: AbortSignal | undefined;
@@ -79,7 +124,7 @@ describe("automation service lifecycle", () => {
         }),
       },
     );
-    const inngestRun = inngestExecute({ workflow: { schemaVersion: "1.2" } });
+    const inngestRun = inngestExecute({ workflow: { schemaVersion: "1.3" } });
     await runStarted;
 
     const shutdown = service.shutdown();
@@ -116,7 +161,7 @@ describe("automation service lifecycle", () => {
     const response = await fetch(`http://127.0.0.1:${address.port}/v1/run`, {
       method: "POST",
       headers: headers(),
-      body: JSON.stringify({ workflow: { schemaVersion: "1.2" } }),
+      body: JSON.stringify({ workflow: { schemaVersion: "1.3" } }),
       signal: requestController.signal,
     });
     expect(response.status).toBe(200);
@@ -149,7 +194,7 @@ describe("automation service lifecycle", () => {
       method: "POST",
       url: "/v1/run",
       headers: headers(),
-      payload: { workflow: { schemaVersion: "1.2" } },
+      payload: { workflow: { schemaVersion: "1.3" } },
     });
     await started;
 
@@ -190,7 +235,7 @@ describe("automation service lifecycle", () => {
     const response = await fetch(`http://127.0.0.1:${address.port}/v1/run`, {
       method: "POST",
       headers: headers(),
-      body: JSON.stringify({ workflow: { schemaVersion: "1.2" } }),
+      body: JSON.stringify({ workflow: { schemaVersion: "1.3" } }),
     });
     expect(response.status).toBe(200);
     await response.body?.getReader().read();

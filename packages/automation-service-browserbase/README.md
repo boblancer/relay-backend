@@ -1,7 +1,7 @@
 # @relay/automation-service-browserbase
 
-Private Fastify service for executing finalized Relay workflows through authenticated
-HTTP requests, plus an opt-in local Inngest POC. It imports
+Local Fastify POC for executing finalized Relay workflows through unauthenticated
+streaming and process-local batch APIs, plus an opt-in local Inngest POC. It imports
 `@relay/automation-worker-browserbase` directly and has no dependency on FastAPI or
 PostgreSQL.
 
@@ -18,18 +18,28 @@ npm ci --prefix packages/automation-service-browserbase
 npm run build --prefix packages/automation-service-browserbase
 ```
 
-Set `BROWSERBASE_API_KEY` and a random service token containing at least 32 bytes, then
-start the service:
+Set `BROWSERBASE_API_KEY`, then start the service:
 
 ```bash
-export AUTOMATION_SERVICE_TOKEN="$(openssl rand -hex 32)"
 npm start --prefix packages/automation-service-browserbase
 ```
 
 The service reads only process environment variables. It does not load another
 repository's `.env.local` or resolve workflows from the persistence API.
 
+From the repository root, a one-line local development start using the ignored `.env`
+file is:
+
+```bash
+set -a; source .env; set +a; npm run dev --prefix packages/automation-service-browserbase
+```
+
 ## API
+
+Frontend/BFF callers should omit `Authorization`. Send `Content-Type: application/json`
+for both POST routes, request `application/x-ndjson` from `/v1/run`, and request
+`application/json` from batch routes. Browser clients should use an existing same-origin
+development proxy because this service does not add a public CORS boundary.
 
 `POST /v1/run` accepts:
 
@@ -43,11 +53,16 @@ repository's `.env.local` or resolve workflows from the persistence API.
 }
 ```
 
-The workflow must be a complete canonical schema 1.2 document. Provider configuration
+The workflow must be a complete canonical schema 1.3 document. Earlier schema versions
+are rejected before Browserbase provisioning. Provider configuration
 cannot be overridden by the request. Successful preflight returns
 `application/x-ndjson`; every line contains the response's ephemeral `X-Run-Id`.
 Progress events and 15-second heartbeats are followed by exactly one
 `worker.outcome` line.
+
+Schema 1.3 action and assertion steps run in workflow order. Assertion failures use the
+same privacy-safe terminal outcome as other execution failures and never expose expected
+or observed page text.
 
 Preflight failures return privacy-safe `422` JSON without provisioning Browserbase.
 When local capacity is full, the service returns `429` and `Retry-After`. Provisioning,
@@ -55,10 +70,41 @@ execution, cancellation, and timeout outcomes are terminal stream lines because 
 stream has already begun with HTTP `200`.
 
 Client disconnect cancels the run and releases its fresh Browserbase session. There is
-no result lookup or reconnection because the service stores no run state. Callers must
-not automatically retry: browser actions can have external side effects.
+no direct-run result lookup or reconnection. Callers must not automatically retry:
+browser actions can have external side effects.
 
-`GET /health/live` and `GET /health/ready` do not require authentication. Readiness
+### In-memory batches
+
+`POST /v1/batches` accepts one to ten complete workflows without `startStepId` or
+`parameterValues`:
+
+```json
+{
+  "runs": [
+    { "workflow": {} },
+    { "workflow": {} }
+  ]
+}
+```
+
+The service returns `202` with a batch ID and runs queued workflows FIFO whenever one
+of the process's five default run slots is available. Batch, direct, and Inngest work
+share the same configured limit. Direct and Inngest requests still receive immediate
+capacity rejection instead of joining the batch queue.
+
+`GET /v1/batches/{batchId}` returns only workflow IDs, safe statuses, numeric progress,
+durations, and fixed failure fields. Completed and skipped steps both advance
+`currentStep`. Workflow documents, names, URLs, targets, values, provider identifiers,
+and raw errors are never returned.
+
+Batch state is process-local. Up to 100 batches are retained, terminal batches expire
+after one hour, and all state is lost on restart. Accepted workflows may therefore run
+zero or one time. Do not automatically retry an uncertain submission because a retry
+can duplicate external side effects.
+
+No Relay HTTP endpoint requires an `Authorization` header. The service defaults to
+`127.0.0.1`; do not expose this unauthenticated POC publicly. `GET /health/live` and
+`GET /health/ready` report process health. Readiness
 returns `503` only while the process is shutting down, not merely while it is at run
 capacity.
 
@@ -76,7 +122,6 @@ Start the service in development mode:
 
 ```bash
 export BROWSERBASE_API_KEY="your-browserbase-api-key"
-export AUTOMATION_SERVICE_TOKEN="$(openssl rand -hex 32)"
 export AUTOMATION_HOST="127.0.0.1"
 export INNGEST_DEV=1
 npm run dev --prefix packages/automation-service-browserbase
@@ -99,10 +144,9 @@ are outside this POC.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `AUTOMATION_SERVICE_TOKEN` | required | Dedicated bearer token; at least 32 bytes |
-| `AUTOMATION_HOST` | `0.0.0.0` | Listen host |
+| `AUTOMATION_HOST` | `127.0.0.1` | Listen host; overriding loopback can expose the unauthenticated POC |
 | `PORT` | `8080` | Listen port |
-| `AUTOMATION_MAX_CONCURRENT_RUNS` | `1` | Per-process active-run limit |
+| `AUTOMATION_MAX_CONCURRENT_RUNS` | `5` | Shared per-process active-run limit |
 | `AUTOMATION_RETRY_AFTER_SECONDS` | `1` | `Retry-After` value for capacity rejection |
 | `AUTOMATION_RUN_TIMEOUT_MS` | `600000` | Run deadline; maximum 10 minutes |
 | `AUTOMATION_STEP_TIMEOUT_MS` | `60000` | Step deadline; maximum 60 seconds |
@@ -115,9 +159,11 @@ are outside this POC.
 | `INNGEST_DEV` | unset | Set exactly `1` to register the local `/api/inngest` POC endpoint; requires a loopback host |
 
 The service disables general Fastify request logging. Its own JSON logs contain only a
-generated run ID, fixed lifecycle state, duration, and safe outcome code. Workflow
-bodies, URLs, payloads, parameters, authorization headers, Browserbase identifiers,
-connection URLs, and raw exceptions never enter responses or logs.
+generated run ID, fixed lifecycle state, duration, and safe outcome code. Direct runs
+also emit `run.step` records with the numeric step index, fixed status, and optional
+fixed phase or skip reason and numeric duration. Workflow bodies, step IDs, URLs,
+targets, payloads, parameters, diagnostics, request headers, Browserbase identifiers,
+connection URLs, and raw exceptions never enter logs.
 
 ## Verification
 
@@ -137,7 +183,9 @@ BROWSERBASE_E2E=1 npm run test:browserbase --prefix packages/automation-service-
 
 ## Deliberate boundaries
 
-This package does not schedule, queue, persist, retry, reconnect, or provide idempotency
-for runs. It has no user account or workflow-ownership model and is intended only for a
-private network behind TLS. Horizontal replicas must be sized so their combined
-per-process capacity does not exceed the Browserbase project limit.
+This package has one bounded process-local batch queue, but does not schedule, persist,
+retry, reconnect, or provide idempotency for runs. It has no user account or
+workflow-ownership or authentication model and is intended only for loopback use.
+It is not safe to expose publicly.
+Horizontal replicas must be sized so their combined per-process capacity does not
+exceed the Browserbase project limit.
