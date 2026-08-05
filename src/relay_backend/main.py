@@ -7,9 +7,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from scalar_fastapi import AgentScalarConfig, OpenAPISource, get_scalar_api_reference
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from relay_backend.contract import load_openapi_contract
+from relay_backend.contract import load_automation_openapi_contract, load_openapi_contract
 from relay_backend.controllers.workflows import router as workflow_router
 from relay_backend.data.database import Database
 from relay_backend.errors import (
@@ -52,10 +53,39 @@ def create_app(
 
     app = FastAPI(
         title="Browser Memory Recorder Cloud Workflow API",
+        docs_url=None,
         lifespan=lifespan,
+        redoc_url=None,
     )
     contract = load_openapi_contract()
+    automation_contract = load_automation_openapi_contract()
     app.openapi = lambda: contract
+
+    @app.get("/docs", include_in_schema=False)
+    async def scalar_api_reference():
+        return get_scalar_api_reference(
+            title="Relay API Reference",
+            sources=[
+                OpenAPISource(
+                    title="Workflow Storage",
+                    slug="workflow-storage",
+                    content=contract,
+                    default=True,
+                ),
+                OpenAPISource(
+                    title="Workflow Runs",
+                    slug="workflow-runs",
+                    content=automation_contract,
+                ),
+            ],
+            scalar_js_url="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.64.0",
+            agent=AgentScalarConfig(disabled=True),
+            hide_test_request_button=True,
+            persist_auth=False,
+            show_developer_tools="never",
+            telemetry=False,
+        )
+
     app.add_middleware(RequestBodyLimitMiddleware)
     app.include_router(workflow_router)
     _install_error_handlers(app)

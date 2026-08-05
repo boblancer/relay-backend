@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from relay_backend import contract as contracts
 from relay_backend.data.database import Database
 from relay_backend.main import create_app
 from relay_backend.services.workflows import WorkflowService
@@ -338,3 +339,41 @@ def test_served_openapi_is_the_authenticated_repository_contract(client: TestCli
         "/v1/workflows/{workflowId}",
         "/v1/workflows/{workflowId}/finish",
     }
+
+
+def test_automation_contract_loader_reads_the_run_service_contract() -> None:
+    contract = contracts.load_automation_openapi_contract()
+
+    assert contract["info"]["title"] == "Relay Browserbase Automation Service"
+    assert "security" not in contract
+    assert "securitySchemes" not in contract["components"]
+    assert set(contract["paths"]) == {
+        "/v1/run",
+        "/v1/batches",
+        "/v1/batches/{batchId}",
+        "/health/live",
+        "/health/ready",
+    }
+    assert "/api/inngest" not in contract["paths"]
+
+
+def test_docs_use_scalar_and_disable_the_default_redoc(client: TestClient) -> None:
+    docs = client.get("/docs")
+    redoc = client.get("/redoc")
+
+    assert docs.status_code == 200
+    assert "scalar" in docs.text.lower()
+    assert "<title>Relay API Reference</title>" in docs.text
+    assert '"title": "Workflow Storage"' in docs.text
+    assert '"slug": "workflow-storage"' in docs.text
+    assert '"default": true' in docs.text
+    assert '"title": "Workflow Runs"' in docs.text
+    assert '"slug": "workflow-runs"' in docs.text
+    assert '"/v1/run"' in docs.text
+    assert '"bearerAuth"' not in docs.text
+    assert "/api/inngest" not in docs.text
+    assert "swagger-ui" not in docs.text.lower()
+    assert '"agent": {"disabled": true}' in docs.text
+    assert '"hideTestRequestButton": true' in docs.text
+    assert '"showDeveloperTools": "never"' in docs.text
+    assert redoc.status_code == 404

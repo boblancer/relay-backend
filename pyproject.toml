@@ -14,6 +14,7 @@ dependencies = [
   "psycopg[binary,pool]",
   "pydantic-settings",
   "pyyaml",
+  "scalar-fastapi>=1.8.2",
   "sqlalchemy",
   "uvicorn[standard]",
 ]
@@ -29,7 +30,10 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/relay_backend"]
-force-include = { "openapi.yaml" = "relay_backend/openapi.yaml" }
+
+[tool.hatch.build.targets.wheel.force-include]
+"openapi.yaml" = "relay_backend/openapi.yaml"
+"packages/automation-service-browserbase/openapi.yaml" = "relay_backend/automation_service_openapi.yaml"
 
 [tool.pytest.ini_options]
 addopts = "-ra"
