@@ -2,7 +2,8 @@
 
 Relay Backend is a Python 3.12 FastAPI proof of concept that persists Browser Memory
 Recorder workflow documents in PostgreSQL, with separate TypeScript packages for
-Browserbase execution and stateless HTTP transport. Before changing the repository, read
+Browserbase execution and unauthenticated loopback streaming/in-memory batch HTTP transport. Before
+changing the repository, read
 [`NAVIGATION.md`](NAVIGATION.md); it is the canonical architecture, ownership, and file
 structure guide.
 
@@ -30,8 +31,11 @@ setup step, or file location changes.
 - Keep canonical documents and privacy-safe summaries synchronized in one transaction.
 - Never expose or log workflow bodies, credentials, step payloads, targets, parameter
   values, source session IDs, or persistence details.
-- Keep run-service request/header logging disabled; stream exactly one safe terminal
-  outcome and abort Browserbase work on disconnect or shutdown.
+- Keep run-service request/header logging disabled; keep its default bind address on
+  loopback; stream exactly one safe terminal outcome and abort Browserbase work on
+  disconnect or shutdown. The unauthenticated POC must not be exposed publicly.
+- Keep batch polling projections privacy-safe, enforce shared process-wide run capacity,
+  and never start queued batch work after shutdown begins.
 - List queries must read only safe summaries, not canonical workflow documents.
 - Keep runtime SQL parameterized.
 - Keep `openapi.yaml`, Pydantic models, controllers, and tests synchronized.

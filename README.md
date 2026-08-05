@@ -2,7 +2,7 @@
 
 Local proof-of-concept persistence backend for Browser Memory Recorder's canonical
 workflow documents, plus provider-neutral automation, a Browserbase worker, and a
-stateless internal run service.
+private internal execution service with streaming and in-memory batch APIs.
 The FastAPI service implements the repository's `openapi.yaml`, including atomic
 revisions, global idempotency, privacy-safe summaries, and shared HTTP Basic
 authentication. It does not execute workflows.
@@ -27,9 +27,16 @@ uv run alembic upgrade head
 uv run uvicorn relay_backend.main:app --reload
 ```
 
-The API is available at `http://127.0.0.1:8000`. Interactive documentation is at
-`http://127.0.0.1:8000/docs`, and the authoritative contract is served from
-`http://127.0.0.1:8000/openapi.json`.
+The API is available at `http://127.0.0.1:8000`. The read-only Scalar API reference is
+at `http://127.0.0.1:8000/docs`; its selector includes **Workflow Storage** and
+**Workflow Runs**. The persistence contract remains available from
+`http://127.0.0.1:8000/openapi.json`. The local documentation page loads its pinned
+Scalar browser bundle from jsDelivr, so opening it requires internet access.
+
+The run reference documents the separate private Browserbase service; it does not add
+`POST /v1/run` to FastAPI. The optional local `/api/inngest` adapter is orchestration
+owned by the Inngest SDK, not a third Relay API, so use the local Inngest guide and UI
+rather than the API reference for that path.
 
 Create a draft using a fresh UUID for the logical mutation:
 
@@ -57,10 +64,10 @@ curl \
 | `npm ci --prefix packages/automation-worker-browserbase` | Install the Browserbase worker's locked dependencies after building automation-core |
 | `npm test --prefix packages/automation-worker-browserbase` | Run Browserbase worker tests without creating paid sessions |
 | `npm run build --prefix packages/automation-worker-browserbase` | Build the Browserbase worker library and CLI |
-| `npm ci --prefix packages/automation-service-browserbase` | Install the stateless run service's locked dependencies after building the worker |
+| `npm ci --prefix packages/automation-service-browserbase` | Install the execution service's locked dependencies after building the worker |
 | `npm test --prefix packages/automation-service-browserbase` | Run HTTP, lifecycle, integration, and privacy tests without paid sessions |
 | `npm run build --prefix packages/automation-service-browserbase` | Build the Fastify service and declarations |
-| `npm start --prefix packages/automation-service-browserbase` | Start the stateless run service |
+| `npm start --prefix packages/automation-service-browserbase` | Start the execution service |
 
 Tests use `TEST_DATABASE_URL` when set and otherwise use the local Compose database.
 They truncate only the `workflows` and `idempotency_records` tables between cases.
@@ -84,9 +91,8 @@ docker compose down --volumes
 | `BROWSERBASE_REGION` | Browserbase session region; defaults to `us-west-2` |
 | `BROWSERBASE_USE_PROXY` | Opt into managed proxy routing; defaults to `false` |
 | `BROWSERBASE_VERIFIED` | Request Verified mode; defaults to `false` |
-| `AUTOMATION_SERVICE_TOKEN` | Dedicated run-service bearer token; at least 32 bytes |
-| `AUTOMATION_HOST` / `PORT` | Run-service listen address; defaults to `0.0.0.0:8080` |
-| `AUTOMATION_MAX_CONCURRENT_RUNS` | Per-process run capacity; defaults to `1` |
+| `AUTOMATION_HOST` / `PORT` | Run-service listen address; defaults to `127.0.0.1:8080` |
+| `AUTOMATION_MAX_CONCURRENT_RUNS` | Shared per-process run capacity; defaults to `5` |
 | `AUTOMATION_RETRY_AFTER_SECONDS` | Capacity response delay hint; defaults to `1` |
 | `AUTOMATION_RUN_TIMEOUT_MS` | Run deadline, at most 10 minutes; defaults to `600000` |
 | `AUTOMATION_STEP_TIMEOUT_MS` | Step deadline, at most 60 seconds; defaults to `60000` |
@@ -94,7 +100,9 @@ docker compose down --volumes
 | `INNGEST_DEV` | Set exactly `1` with a loopback `AUTOMATION_HOST` to enable the local-only Inngest POC endpoint |
 
 No credentials are built into the application. Copy `.env.example` to the ignored
-`.env` file and replace the example password.
+`.env` file, replace the example password, and populate the service-specific secrets
+you use. Optional overrides are omitted from the sample; their runtime defaults are
+listed above.
 
 ## Architecture
 
@@ -120,18 +128,19 @@ lifecycle and any persistence. The package has no dependency on FastAPI, Postgre
 Browserbase, or the service's internal persistence model.
 
 [`packages/automation-worker-browserbase`](packages/automation-worker-browserbase/README.md)
-is the provider-specific server consumer. It validates complete schema 1.2 workflows,
+is the provider-specific server consumer. It validates complete schema 1.3 workflows,
 resolves explicit run parameters, owns fresh Browserbase session lifecycle, and returns
 privacy-safe events and outcomes. It does not add an execution route to FastAPI or
-persist run state.
+persist run state. Earlier schema versions are rejected before provider provisioning;
+schema 1.3 visibility and text-containment assertions execute once without retries.
 
 [`packages/automation-service-browserbase`](packages/automation-service-browserbase/README.md)
-is a separate Fastify process exposing authenticated `POST /v1/run`. Each request
-carries a full workflow and explicit parameter values and receives privacy-safe NDJSON
-events plus one terminal outcome. Client disconnect cancels the run. The process does
-not call the persistence API, use PostgreSQL, or retain run state. An opt-in local
-Inngest Dev Server function reuses the same worker, capacity, and shutdown lifecycle for
-synthetic POC events without changing the caller-facing OpenAPI contract.
+is a separate Fastify process exposing unauthenticated local direct and batch execution APIs.
+`POST /v1/run` streams privacy-safe NDJSON and cancels on disconnect. `POST /v1/batches`
+queues one to ten workflows in process memory, while `GET /v1/batches/{batchId}` polls
+safe progress for up to one hour. Batch, direct, and opt-in local Inngest work share the
+same five-slot default capacity. The process does not call the persistence API or use
+PostgreSQL, and all batch state disappears on restart.
 
 Successful idempotency records are retained indefinitely. A replay with the same key,
 method, path, and validated canonical JSON returns the original response even if the
@@ -144,7 +153,13 @@ automation-library boundary.
 See [ADR 0004](docs/decisions/0004-browserbase-background-worker.md) for the Browserbase
 worker's original boundary. See
 [ADR 0005](docs/decisions/0005-stateless-browserbase-run-service.md) for the superseding
-stateless HTTP service decision.
+stateless HTTP service decision. See
+[ADR 0006](docs/decisions/0006-schema-1.3-assertion-execution.md) for the execution
+contract's schema 1.3-only assertion semantics. See
+[ADR 0007](docs/decisions/0007-in-memory-background-batches.md) for process-local batch
+queueing and polling. See
+[ADR 0008](docs/decisions/0008-unauthenticated-local-execution-service.md) for the
+execution service's unauthenticated loopback-only POC boundary.
 
 ## POC boundaries
 
@@ -153,8 +168,10 @@ deletion, workflow-schema migration, collaboration, replay execution,
 application-level encryption, and production deployment configuration. The standalone
 automation library excludes browser lifecycle, queues, service endpoints, persistence,
 retries, recording, and interactive replay controls. The Browserbase worker owns only a
-single run. Its HTTP service adds private transport, streaming, authentication, health,
-and per-process capacity, but still excludes queues, schedules, run persistence,
-idempotency, result lookup, reconnection, legacy workflow migration, user authorization,
-and authenticated contexts. Workflow documents may contain sensitive values, so request
-bodies and workflow contents must not be logged.
+single run. Its HTTP service adds local transport, streaming, health,
+shared per-process capacity, and a bounded in-memory batch queue. It still excludes
+schedules, durable run persistence, idempotency, reconnection, legacy workflow migration,
+user authorization, and authenticated contexts. Workflow documents may contain sensitive
+values, so request bodies and workflow contents must not be logged.
+The execution service has no authentication and defaults to loopback; it is not safe to
+expose publicly.

@@ -72,6 +72,30 @@ def test_settings_reject_an_empty_shared_password() -> None:
         )
 
 
+def test_settings_ignore_dotenv_local(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "DATABASE_URL=postgresql://relay:relay@localhost:5432/relay\n"
+        "BASIC_AUTH_USERNAME=relay\n"
+        "BASIC_AUTH_PASSWORD=relay-password\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env.local").write_text(
+        "DATABASE_URL=postgresql://relay:relay@localhost:5432/relay\n"
+        "BASIC_AUTH_USERNAME=local-relay\n"
+        "BASIC_AUTH_PASSWORD=local-password\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("BASIC_AUTH_USERNAME", raising=False)
+    monkeypatch.delenv("BASIC_AUTH_PASSWORD", raising=False)
+
+    settings = Settings()
+
+    assert settings.basic_auth_username == "relay"
+    assert settings.basic_auth_password.get_secret_value() == "relay-password"
+
+
 def test_api_requires_shared_basic_credentials(client: TestClient) -> None:
     client.headers.pop("Authorization")
 

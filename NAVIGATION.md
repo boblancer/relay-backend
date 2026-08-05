@@ -25,7 +25,8 @@ It defines five authenticated operations:
 
 The independent execution boundary is
 [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml).
-It defines private `POST /v1/run` plus unauthenticated liveness and readiness checks.
+It defines unauthenticated local direct-run and in-memory batch operations plus
+liveness and readiness checks.
 
 The service does not record browser activity or execute workflows. It only persists and
 retrieves the canonical documents produced elsewhere. The repository also contains the
@@ -36,7 +37,7 @@ persistence or browser lifecycle. The separate
 package is its Browserbase-specific server consumer.
 The separate
 [`@relay/automation-service-browserbase`](packages/automation-service-browserbase/README.md)
-package exposes that worker to authenticated internal callers without adding execution
+package exposes that worker to local callers without adding execution
 to FastAPI or PostgreSQL.
 
 ## Sources of truth and reading order
@@ -45,7 +46,7 @@ Use this precedence when documentation and implementation appear to disagree:
 
 1. [`openapi.yaml`](openapi.yaml) is authoritative for the persistence wire contract,
    while [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml)
-   is authoritative for the stateless execution wire contract.
+   is authoritative for the execution wire contract.
 2. Runtime code under [`src/relay_backend/`](src/relay_backend/) is authoritative for
    current implementation behavior.
 3. Tests under [`tests/`](tests/) are executable examples of required behavior.
@@ -73,7 +74,7 @@ For a first pass through the code, read:
 10. [`packages/automation-worker-browserbase/README.md`](packages/automation-worker-browserbase/README.md)
     for Browserbase run configuration, CLI usage, and provider lifecycle.
 11. [`packages/automation-service-browserbase/README.md`](packages/automation-service-browserbase/README.md)
-    for the stateless HTTP contract, configuration, streaming, and operations.
+    for the streaming and in-memory batch HTTP contract, configuration, and operations.
 
 ## Architecture overview
 
@@ -115,11 +116,17 @@ interpret HTTP requests.
 Background execution is a sibling Node service rather than another FastAPI layer:
 
 ```text
-POST /v1/run (private bearer authentication)
+POST /v1/run or /v1/batches (unauthenticated local HTTP)
+                             |
+               +-------------+-------------+
+               |                           |
+        direct NDJSON             in-memory FIFO batch
+               |                  + safe polling snapshot
+               +-------------+-------------+
                              |
                              v
 @relay/automation-service-browserbase
-     validation | NDJSON | capacity | cancellation
+ validation | transport | shared capacity | cancellation
                              |
                              v
 @relay/automation-worker-browserbase
@@ -134,10 +141,15 @@ POST /v1/run (private bearer authentication)
              structured events and terminal result
 ```
 
-The service accepts complete canonical schema 1.2 documents and explicit parameters,
-then the worker owns one fresh Browserbase session. Neither shares the Python service's
-transaction, repository, authentication, or persistence infrastructure. The service
-adds only private HTTP transport; it does not add queues, schedules, or durable runs.
+The service accepts complete canonical schema 1.3 documents, then the worker owns one
+fresh Browserbase session per run. Direct runs accept explicit parameters and stream
+progress. Batches queue one to ten workflows in process memory and retain privacy-safe
+polling snapshots for one hour. All entry points share a configurable per-process
+capacity that defaults to five. Batch state is not durable and disappears on restart.
+Neither execution mode shares the Python service's transaction, repository,
+authentication, or persistence infrastructure. Earlier workflow schema versions are
+rejected before provisioning. Assertions resolve one visible target and evaluate once
+in workflow order without retries or post-assertion settling.
 
 ### Application assembly and cross-cutting behavior
 
@@ -154,6 +166,12 @@ adds only private HTTP transport; it does not add queues, schedules, or durable 
 - The app serves the checked-in OpenAPI contract rather than FastAPI's generated schema.
   [`src/relay_backend/contract.py`](src/relay_backend/contract.py) loads the repository
   copy during development and the packaged copy from the wheel after installation.
+- The app disables FastAPI's built-in Swagger UI and ReDoc pages. `/docs` serves one
+  read-only Scalar reference with selectable **Workflow Storage** and **Workflow Runs**
+  sources backed by the two checked-in contracts. `/openapi.json` remains the
+  persistence contract. Scalar telemetry and browser credential persistence are
+  disabled, and the SDK-owned local `/api/inngest` adapter is not presented as a Relay
+  API source.
 
 ### Layer responsibilities
 
@@ -265,7 +283,10 @@ relay_backend/
 │       ├── 0002-shared-basic-authentication.md
 │       ├── 0003-standalone-typescript-automation-core.md
 │       ├── 0004-browserbase-background-worker.md
-│       └── 0005-stateless-browserbase-run-service.md
+│       ├── 0005-stateless-browserbase-run-service.md
+│       ├── 0006-schema-1.3-assertion-execution.md
+│       ├── 0007-in-memory-background-batches.md
+│       └── 0008-unauthenticated-local-execution-service.md
 ├── packages/
 │   ├── automation-core/
 │   │   ├── package.json               Private ESM package metadata and scripts
@@ -282,7 +303,7 @@ relay_backend/
 │   └── automation-service-browserbase/
 │       ├── package.json               Private Fastify service metadata and scripts
 │       ├── package-lock.json          Service dependency lockfile
-│       ├── openapi.yaml               Authoritative stateless run-service contract
+│       ├── openapi.yaml               Authoritative execution-service contract
 │       ├── README.md                  HTTP, configuration, privacy, and operations
 │       ├── src/                       Configuration, HTTP lifecycle, local Inngest POC, and entry point
 │       └── tests/                     Contract, streaming, Inngest, lifecycle, integration, and smoke tests
@@ -340,15 +361,18 @@ are package markers and contain no runtime behavior.
 | [`tests/test_api.py`](tests/test_api.py) | Proves authentication, routes, errors, limits, and served-contract behavior. |
 | [`tests/conftest.py`](tests/conftest.py) | Applies migrations once and truncates only the two application tables between tests. |
 | [`docs/decisions/`](docs/decisions/) | Preserves the rationale and consequences of accepted architecture/security decisions. |
-| [`packages/automation-core/src/workflow.ts`](packages/automation-core/src/workflow.ts) | Defines the strict TypeScript schema 1.2 contract and locator ordering used by automation. |
+| [`packages/automation-core/src/workflow.ts`](packages/automation-core/src/workflow.ts) | Defines the strict TypeScript schema 1.3 execution contract, assertions, and locator ordering. |
 | [`packages/automation-core/src/preflight.ts`](packages/automation-core/src/preflight.ts) | Validates runner inputs, start selection, enabled ranges, and bootstrap URL choice. |
-| [`packages/automation-core/src/execution.ts`](packages/automation-core/src/execution.ts) | Owns Playwright actions, frame/locator resolution, settling, waits, and cancellation boundaries. |
+| [`packages/automation-core/src/target-resolution.ts`](packages/automation-core/src/target-resolution.ts) | Owns frame selection, locator construction, uniqueness and visibility checks, and recorded element fingerprint validation. |
+| [`packages/automation-core/src/step-actions.ts`](packages/automation-core/src/step-actions.ts) | Owns canonical Playwright actions, combobox input fidelity, assertions, and recorded page-position restoration. |
+| [`packages/automation-core/src/execution.ts`](packages/automation-core/src/execution.ts) | Owns automatic settling, explicit waits, cancellation-aware step orchestration, and compatibility exports. |
+| [`packages/automation-core/src/execution-errors.ts`](packages/automation-core/src/execution-errors.ts) | Defines privacy-safe execution failures, phases, cancellation, and interruptible sleeping shared across execution modules. |
 | [`packages/automation-core/src/runner.ts`](packages/automation-core/src/runner.ts) | Runs steps sequentially and returns transport-neutral events and terminal results. |
 | [`packages/automation-core/tests/`](packages/automation-core/tests/) | Proves contract agreement, behavior parity, fail-fast execution, cancellation, and diagnostic privacy. |
 | [`packages/automation-worker-browserbase/src/`](packages/automation-worker-browserbase/src/) | Validates complete run inputs, resolves parameters, owns Browserbase lifecycle, and exposes the JSONL CLI. |
 | [`packages/automation-worker-browserbase/tests/`](packages/automation-worker-browserbase/tests/) | Proves worker lifecycle, cleanup, timeout, parameter, CLI, and privacy behavior without paid sessions by default. |
-| [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml) | Defines the independent `POST /v1/run` and health wire contract. |
-| [`packages/automation-service-browserbase/src/`](packages/automation-service-browserbase/src/) | Owns bearer authentication, request limits, NDJSON transport, local capacity, disconnect cancellation, and shutdown. |
+| [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml) | Defines the independent direct-run, in-memory batch, polling, and health wire contract. |
+| [`packages/automation-service-browserbase/src/`](packages/automation-service-browserbase/src/) | Owns media validation, request limits, NDJSON and batch transport, shared local capacity, disconnect cancellation, and shutdown. |
 | [`packages/automation-service-browserbase/src/inngest.ts`](packages/automation-service-browserbase/src/inngest.ts) | Owns the opt-in local Inngest event validation, one-function registration, and safe terminal projection. |
 | [`packages/automation-service-browserbase/tests/`](packages/automation-service-browserbase/tests/) | Proves the service contract and worker integration without paid sessions by default. |
 | [`docs/designs/inngest-browserbase-orchestration.md`](docs/designs/inngest-browserbase-orchestration.md) | Defines the local-only Inngest POC boundary and deferred production decisions. |
@@ -368,9 +392,9 @@ are package markers and contain no runtime behavior.
 | Change request-size limits | [`request_limits.py`](src/relay_backend/request_limits.py) | `x-contract-semantics`, request-body docs, and boundary tests. |
 | Add configuration | [`settings.py`](src/relay_backend/settings.py) | [`.env.example`](.env.example), README configuration table, and tests. |
 | Change packaging or dependencies | [`pyproject.toml`](pyproject.toml) | `uv.lock`, contract packaging, and README requirements. |
-| Change background automation behavior | [`packages/automation-core/src/runner.ts`](packages/automation-core/src/runner.ts) and [`execution.ts`](packages/automation-core/src/execution.ts) | Package tests, public exports, package README, and ADR 0003 boundaries. |
+| Change background automation behavior | [`packages/automation-core/src/runner.ts`](packages/automation-core/src/runner.ts), [`step-actions.ts`](packages/automation-core/src/step-actions.ts), [`target-resolution.ts`](packages/automation-core/src/target-resolution.ts), and [`execution.ts`](packages/automation-core/src/execution.ts) | Package tests, public exports, package README, and ADR 0003 boundaries. |
 | Change Browserbase run lifecycle | [`packages/automation-worker-browserbase/src/worker.ts`](packages/automation-worker-browserbase/src/worker.ts) | Worker tests, CLI output, package README, and ADR 0004 boundaries. |
-| Change the stateless execution API | [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml) | Service runtime, tests, README, and ADR 0005 boundaries. |
+| Change the Browserbase execution API | [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml) | Service runtime, tests, README, and ADR 0005/0007/0008 boundaries. |
 | Change the local Inngest POC | [`packages/automation-service-browserbase/src/inngest.ts`](packages/automation-service-browserbase/src/inngest.ts) | Shared lifecycle tests, package README, POC design, and privacy assertions. |
 
 ## Invariants to preserve
@@ -397,17 +421,24 @@ are package markers and contain no runtime behavior.
   persist browser sessions, call Browserbase, or depend on FastAPI/PostgreSQL.
 - Automation events, terminal results, and thrown execution diagnostics exclude action
   payloads, target and locator values, URLs, workflow bodies, and source session IDs.
-- The Browserbase worker accepts only complete schema 1.2 workflows, never reuses the
+- The Browserbase worker accepts only complete schema 1.3 workflows, never reuses the
   recorded source session, never retries actions, and always attempts session cleanup.
+- Assertions evaluate once, emit `asserting`, never settle afterward, and never expose
+  expected or observed text in diagnostics.
 - Worker JSONL excludes workflow bodies, URLs, payloads, parameter values, connection
   details, provider session IDs, and raw errors.
 - The run service accepts only full request-scoped workflows; it never reads or writes
   PostgreSQL and never calls the persistence API.
-- Run-service authorization uses a dedicated bearer token, and request/header logging
-  remains disabled. All stream lines contain only a generated run ID plus safe worker or
-  service fields.
+- Run-service HTTP routes are intentionally unauthenticated for this POC and default to
+  loopback. Request/header logging remains disabled. All stream lines contain only a
+  generated run ID plus safe worker or service fields.
 - A valid stream contains exactly one terminal outcome. Disconnect and shutdown abort
-  the worker; capacity exhaustion returns `429` without an in-memory queue.
+  the worker; direct and Inngest capacity exhaustion returns `429` without queueing.
+- Batch runs use one bounded FIFO process-local queue and explicit safe polling
+  projections. Batch, direct, and Inngest work never exceed the shared configured
+  capacity; shutdown aborts active work and starts no queued work.
+- Batch workflow inputs are released after their run settles. Terminal snapshots expire
+  after one hour, no active batch is evicted, and all batch state is lost on restart.
 
 ## Configuration, packaging, and local dependencies
 
@@ -417,9 +448,9 @@ are package markers and contain no runtime behavior.
 - The Browserbase worker reads `BROWSERBASE_API_KEY` for real runs and optionally
   `BROWSERBASE_PROJECT_ID`, `BROWSERBASE_REGION`, `BROWSERBASE_USE_PROXY`, and
   `BROWSERBASE_VERIFIED`. Validation-only CLI use does not require credentials.
-- The run service additionally requires `AUTOMATION_SERVICE_TOKEN`, reads listen,
-  capacity, deadline, and shutdown settings from the process environment, and does not
-  load another repository's environment files.
+- The run service reads listen, capacity, deadline, and shutdown settings from the
+  process environment, defaults its host to `127.0.0.1`, requires no service token, and
+  does not load another repository's environment files.
 - [`.env.example`](.env.example) contains local placeholders only. Real `.env` files are
   ignored and must never be committed or copied into documentation.
 - [`compose.yaml`](compose.yaml) binds PostgreSQL only to localhost and persists data in
@@ -453,7 +484,7 @@ Compose database when that variable is absent. Before each test, fixtures trunca
   cancellation, sequential fail-fast execution, and privacy-safe diagnostics.
 - Browserbase worker tests use provider and browser fakes. A navigation-only paid smoke
   test runs only when `BROWSERBASE_E2E=1` is set explicitly.
-- Run-service tests exercise HTTP streaming, authentication, capacity, disconnect,
+- Run-service tests exercise unauthenticated HTTP streaming, media negotiation, capacity, disconnect,
   shutdown, and the real worker with provider fakes. Its HTTP Browserbase smoke test is
   gated by the same explicit `BROWSERBASE_E2E=1` opt-in.
 
@@ -467,9 +498,11 @@ and Browserbase lifecycle, jobs, schedules, service APIs, authentication, execut
 persistence, retries, recording, and interactive replay controls. HTTP Basic must be
 placed behind TLS if the service is exposed beyond localhost.
 The Browserbase worker excludes queues, schedules, and durable run records. Its sibling
-HTTP service remains stateless and excludes scheduling, idempotency, lookup,
-reconnection, user authorization, legacy workflow migration, authenticated contexts,
-and automatic retries.
+HTTP service adds only a bounded process-local batch queue and safe polling snapshots;
+it still excludes durable execution, scheduling, idempotency, reconnection, user
+authorization, legacy workflow migration, authenticated contexts, and automatic retries.
+The execution service defaults to loopback and is not safe to expose publicly because
+its routes are unauthenticated.
 
 Do not silently design these capabilities into unrelated changes. A costly-to-reverse
 addition or replacement should be recorded as a new ADR under
@@ -518,6 +551,9 @@ agree with the code.
 - [`ADR 0003: Standalone TypeScript automation core`](docs/decisions/0003-standalone-typescript-automation-core.md)
 - [`ADR 0004: Browserbase background worker`](docs/decisions/0004-browserbase-background-worker.md)
 - [`ADR 0005: Stateless Browserbase run service`](docs/decisions/0005-stateless-browserbase-run-service.md)
+- [`ADR 0006: Require schema 1.3 for background execution`](docs/decisions/0006-schema-1.3-assertion-execution.md)
+- [`ADR 0007: Add in-memory background batches`](docs/decisions/0007-in-memory-background-batches.md)
+- [`ADR 0008: Unauthenticated local execution service`](docs/decisions/0008-unauthenticated-local-execution-service.md)
 
 When a decision changes, add a new sequential record that supersedes the older one.
 Preserve accepted historical records rather than rewriting or deleting their rationale.
