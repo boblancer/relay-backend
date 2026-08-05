@@ -39,6 +39,8 @@ export interface ReplayWait {
   };
 }
 
+export const MAX_ASSERTION_TEXT_LENGTH = 1_000;
+
 export type ParameterBinding =
   | { source: "recorded" }
   | { source: "fixed"; value: string }
@@ -60,7 +62,6 @@ interface StepBase {
   page: { id: string; url: string; title?: string };
   target?: ElementTarget;
   position?: { x: number; y: number; frameUrl?: string };
-  waitAfter?: ReplayWait;
   metadata: {
     recordedAt: string;
     origin: "recorded" | "manual";
@@ -68,30 +69,48 @@ interface StepBase {
   };
 }
 
+interface ActionStepBase extends StepBase {
+  waitAfter?: ReplayWait;
+}
+
 interface ElementStepBase extends StepBase {
   target: ElementTarget;
 }
 
+interface ElementActionStepBase extends ActionStepBase {
+  target: ElementTarget;
+}
+
 export type WorkflowStep =
-  | (StepBase & { type: "navigate"; payload: { url: string } })
-  | (ElementStepBase & { type: "click"; payload?: Record<string, never> })
-  | (ElementStepBase & {
+  | (ActionStepBase & { type: "navigate"; payload: { url: string } })
+  | (ElementActionStepBase & { type: "click"; payload?: Record<string, never> })
+  | (ElementActionStepBase & {
       type: "fill";
       payload: { value: string };
       parameterBinding: ParameterBinding;
     })
-  | (ElementStepBase & { type: "set_date"; payload: { value: string } })
-  | (ElementStepBase & { type: "select"; payload: { value: string; label?: string } })
-  | (ElementStepBase & { type: "check"; payload?: Record<string, never> })
-  | (ElementStepBase & { type: "uncheck"; payload?: Record<string, never> })
-  | (ElementStepBase & {
+  | (ElementActionStepBase & { type: "set_date"; payload: { value: string } })
+  | (ElementActionStepBase & {
+      type: "select";
+      payload: { value: string; label?: string };
+    })
+  | (ElementActionStepBase & { type: "check"; payload?: Record<string, never> })
+  | (ElementActionStepBase & { type: "uncheck"; payload?: Record<string, never> })
+  | (ElementActionStepBase & {
       type: "keypress";
       payload: { key: string; modifiers: Array<"Alt" | "Control" | "Meta" | "Shift"> };
     })
-  | (ElementStepBase & { type: "submit"; payload?: Record<string, never> });
+  | (ElementActionStepBase & { type: "submit"; payload?: Record<string, never> })
+  | (ElementStepBase & {
+      type: "assertion";
+      expectation:
+        | { kind: "visible" }
+        | { kind: "text_contains"; expected: string };
+      waitAfter?: never;
+    });
 
 export interface Workflow {
-  schemaVersion: "1.2";
+  schemaVersion: "1.3";
   id: string;
   name: string;
   status: "draft" | "complete";
@@ -209,11 +228,16 @@ const StepBaseSchema = z.object({
     })
     .strict()
     .optional(),
-  waitAfter: ReplayWaitSchema.optional(),
   metadata: StepMetadataSchema,
 });
 
+const ActionStepBaseSchema = StepBaseSchema.extend({ waitAfter: ReplayWaitSchema.optional() });
+
 const ElementStepBaseSchema = StepBaseSchema.extend({ target: ReplayableElementTargetSchema });
+
+const ElementActionStepBaseSchema = ActionStepBaseSchema.extend({
+  target: ReplayableElementTargetSchema,
+});
 
 const ParameterBindingSchema = z.discriminatedUnion("source", [
   z.object({ source: z.literal("recorded") }).strict(),
@@ -235,36 +259,36 @@ const ParameterBindingSchema = z.discriminatedUnion("source", [
 const EmptyPayloadSchema = z.object({}).strict();
 
 const WorkflowStepSchema = z.discriminatedUnion("type", [
-  StepBaseSchema.extend({
+  ActionStepBaseSchema.extend({
     type: z.literal("navigate"),
     payload: z.object({ url: z.string().min(1) }).strict(),
   }).strict(),
-  ElementStepBaseSchema.extend({
+  ElementActionStepBaseSchema.extend({
     type: z.literal("click"),
     payload: EmptyPayloadSchema.optional(),
   }).strict(),
-  ElementStepBaseSchema.extend({
+  ElementActionStepBaseSchema.extend({
     type: z.literal("fill"),
     payload: z.object({ value: z.string() }).strict(),
     parameterBinding: ParameterBindingSchema,
   }).strict(),
-  ElementStepBaseSchema.extend({
+  ElementActionStepBaseSchema.extend({
     type: z.literal("set_date"),
     payload: z.object({ value: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).strict(),
   }).strict(),
-  ElementStepBaseSchema.extend({
+  ElementActionStepBaseSchema.extend({
     type: z.literal("select"),
     payload: z.object({ value: z.string(), label: z.string().optional() }).strict(),
   }).strict(),
-  ElementStepBaseSchema.extend({
+  ElementActionStepBaseSchema.extend({
     type: z.literal("check"),
     payload: EmptyPayloadSchema.optional(),
   }).strict(),
-  ElementStepBaseSchema.extend({
+  ElementActionStepBaseSchema.extend({
     type: z.literal("uncheck"),
     payload: EmptyPayloadSchema.optional(),
   }).strict(),
-  ElementStepBaseSchema.extend({
+  ElementActionStepBaseSchema.extend({
     type: z.literal("keypress"),
     payload: z
       .object({
@@ -273,15 +297,30 @@ const WorkflowStepSchema = z.discriminatedUnion("type", [
       })
       .strict(),
   }).strict(),
-  ElementStepBaseSchema.extend({
+  ElementActionStepBaseSchema.extend({
     type: z.literal("submit"),
     payload: EmptyPayloadSchema.optional(),
+  }).strict(),
+  ElementStepBaseSchema.extend({
+    type: z.literal("assertion"),
+    expectation: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("visible") }).strict(),
+      z
+        .object({
+          kind: z.literal("text_contains"),
+          expected: z
+            .string()
+            .max(MAX_ASSERTION_TEXT_LENGTH)
+            .refine((value) => value.trim().length > 0),
+        })
+        .strict(),
+    ]),
   }).strict(),
 ]);
 
 export const WorkflowSchema = z
   .object({
-    schemaVersion: z.literal("1.2"),
+    schemaVersion: z.literal("1.3"),
     id: z.string().uuid(),
     name: z.string().trim().min(1),
     status: z.enum(["draft", "complete"]),

@@ -9,7 +9,7 @@ it.skipIf(!enabled)("runs a navigation-only workflow in Browserbase", async () =
   expect(apiKey, "BROWSERBASE_API_KEY is required when BROWSERBASE_E2E=1").toBeTruthy();
   const now = new Date().toISOString();
   const workflow: Workflow = {
-    schemaVersion: "1.2",
+    schemaVersion: "1.3",
     id: "05b6300c-27c4-4931-8e89-a4b2223d9d8e",
     name: "Browserbase smoke",
     status: "complete",

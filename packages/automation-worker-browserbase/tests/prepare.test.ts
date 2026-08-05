@@ -6,9 +6,11 @@ describe("prepareWorkflow", () => {
   it("rejects legacy workflows and drafts", () => {
     const complete = completeWorkflow([fillStep("recorded", { source: "recorded" })]);
 
-    expect(() => prepareWorkflow({ ...complete, schemaVersion: "1.1" }, undefined, {})).toThrow(
-      expect.objectContaining({ code: "invalid_workflow" }),
-    );
+    for (const schemaVersion of ["1.0", "1.1", "1.2"]) {
+      expect(() => prepareWorkflow({ ...complete, schemaVersion }, undefined, {})).toThrow(
+        expect.objectContaining({ code: "invalid_workflow" }),
+      );
+    }
     expect(() => prepareWorkflow({ ...complete, status: "draft" }, undefined, {})).toThrow(
       expect.objectContaining({ code: "workflow_not_complete" }),
     );

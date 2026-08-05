@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Frame, Locator, Page } from "playwright-core";
 import type { WorkflowStep } from "../src/index.js";
 import {
+  AutomationCancelledError,
   AutomationExecutionError,
   applyPositionBefore,
   executeStepAction,
@@ -31,8 +32,11 @@ function automationPage() {
     count: vi.fn(async () => 1),
     evaluate: vi.fn(async () => true),
     fill: vi.fn(async () => undefined),
+    focus: vi.fn(async () => undefined),
+    innerText: vi.fn(async () => "Ready   FOR\nreview"),
     isVisible: vi.fn(async () => true),
     press: vi.fn(async () => undefined),
+    pressSequentially: vi.fn(async () => undefined),
     selectOption: vi.fn(async () => ["value"]),
     uncheck: vi.fn(async () => undefined),
   } as unknown as Locator;
@@ -113,6 +117,38 @@ describe("executeStepAction", () => {
     expect(locator.selectOption).toHaveBeenLastCalledWith({ label: "One" }, expect.anything());
   });
 
+  it("types naturally into combobox fills without changing ordinary fills", async () => {
+    const { locator, page } = automationPage();
+    const ordinary: WorkflowStep = {
+      ...baseStep(0),
+      type: "fill",
+      payload: { value: "ordinary value" },
+      parameterBinding: { source: "recorded" },
+    };
+    const combobox: WorkflowStep = {
+      ...baseStep(1),
+      type: "fill",
+      target: {
+        candidates: [{ kind: "role", value: "combobox", name: "Location", exact: true }],
+      },
+      payload: { value: "typed value" },
+      parameterBinding: { source: "recorded" },
+    };
+
+    await executeStepAction(page, ordinary);
+    await executeStepAction(page, combobox);
+
+    expect(locator.fill).toHaveBeenCalledOnce();
+    expect(locator.fill).toHaveBeenCalledWith("ordinary value", expect.anything());
+    expect(locator.focus).toHaveBeenCalledOnce();
+    expect(locator.press).toHaveBeenNthCalledWith(1, "ControlOrMeta+A", expect.anything());
+    expect(locator.press).toHaveBeenNthCalledWith(2, "Backspace", expect.anything());
+    expect(locator.pressSequentially).toHaveBeenCalledWith(
+      "typed value",
+      expect.objectContaining({ delay: 20 }),
+    );
+  });
+
   it("restores the recorded frame position before resolving the action", async () => {
     const { frame, page } = automationPage();
 
@@ -140,6 +176,84 @@ describe("executeStepAction", () => {
     expect(error).toBeInstanceOf(AutomationExecutionError);
     expect(JSON.stringify(error)).not.toMatch(/secret-selector|secret-payload|private\.example/);
     expect((error as Error).message).toBe("The automation action could not be completed.");
+  });
+
+  it("evaluates visible and normalized text assertions", async () => {
+    const { locator, page } = automationPage();
+    const visible: WorkflowStep = {
+      ...baseStep(0),
+      type: "assertion",
+      expectation: { kind: "visible" },
+    };
+    const text: WorkflowStep = {
+      ...baseStep(1),
+      type: "assertion",
+      expectation: { kind: "text_contains", expected: "ready for REVIEW" },
+    };
+
+    await expect(executeStepAction(page, visible)).resolves.toMatchObject({
+      locatorKind: "testId",
+    });
+    await expect(executeStepAction(page, text)).resolves.toMatchObject({
+      locatorKind: "testId",
+    });
+    expect(locator.innerText).toHaveBeenCalledOnce();
+  });
+
+  it("returns a fixed privacy-safe failure when assertion text does not match", async () => {
+    const { locator, page } = automationPage();
+    vi.mocked(locator.innerText).mockResolvedValue("private observed page content");
+
+    const error = await executeStepAction(page, {
+      ...baseStep(0),
+      type: "assertion",
+      expectation: { kind: "text_contains", expected: "private expected content" },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AutomationExecutionError);
+    expect((error as Error).message).toBe("The automation assertion did not pass.");
+    expect(JSON.stringify(error)).not.toMatch(/private expected|private observed/);
+  });
+
+  it.each([
+    { count: 0, visible: true, reason: "No match." },
+    { count: 2, visible: true, reason: "Matched 2 elements." },
+    { count: 1, visible: false, reason: "The only match is not visible." },
+  ])("fails an unresolved assertion once without retrying", async ({ count, visible, reason }) => {
+    const { locator, page } = automationPage();
+    vi.mocked(locator.count).mockResolvedValue(count);
+    vi.mocked(locator.isVisible).mockResolvedValue(visible);
+
+    await expect(
+      executeStepAction(page, {
+        ...baseStep(0),
+        type: "assertion",
+        expectation: { kind: "visible" },
+      }),
+    ).rejects.toMatchObject({
+      message: "The automation assertion did not pass.",
+      attempts: [{ kind: "testId", reason }],
+    });
+    expect(locator.count).toHaveBeenCalledOnce();
+  });
+
+  it("honors cancellation before evaluating an assertion", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { locator, page } = automationPage();
+
+    await expect(
+      executeStepAction(
+        page,
+        {
+          ...baseStep(0),
+          type: "assertion",
+          expectation: { kind: "visible" },
+        },
+        controller.signal,
+      ),
+    ).rejects.toBeInstanceOf(AutomationCancelledError);
+    expect(locator.count).not.toHaveBeenCalled();
   });
 });
 
@@ -195,6 +309,59 @@ describe("target and frame resolution", () => {
     expect(resolved.locator).toBe(locator);
     expect(resolved.kind).toBe("css");
     expect(resolved.attempts).toEqual([{ kind: "testId", reason: "No match." }]);
+  });
+
+  it.each([
+    { tagName: "button" },
+    { tagName: "input", inputType: "email" },
+  ])(
+    "falls back when a unique visible match has the wrong recorded fingerprint",
+    async (observedFingerprint) => {
+      const { frame, locator, page } = automationPage();
+      const wrongElement = {
+        count: vi.fn(async () => 1),
+        evaluate: vi.fn(async () => observedFingerprint),
+        isVisible: vi.fn(async () => true),
+      } as unknown as Locator;
+      vi.mocked(locator.evaluate).mockResolvedValue({ tagName: "input", inputType: "text" });
+      vi.mocked(frame.getByRole).mockReturnValue(wrongElement);
+
+      const resolved = await resolveTarget(page, {
+        tagName: "input",
+        inputType: "text",
+        candidates: [
+          { kind: "role", value: "textbox", exact: true },
+          { kind: "css", value: "input", exact: true },
+        ],
+      });
+
+      expect(resolved.locator).toBe(locator);
+      expect(resolved.kind).toBe("css");
+      expect(resolved.attempts).toEqual([
+        {
+          kind: "role",
+          reason: "The matched element does not match the recorded element fingerprint.",
+        },
+      ]);
+    },
+  );
+
+  it("honors cancellation while validating a recorded fingerprint", async () => {
+    const controller = new AbortController();
+    const { locator, page } = automationPage();
+    vi.mocked(locator.evaluate).mockImplementation(async () => {
+      controller.abort();
+      return { tagName: "input", inputType: "text" };
+    });
+
+    await expect(
+      resolveTarget(
+        page,
+        { ...target, tagName: "input", inputType: "text" },
+        undefined,
+        controller.signal,
+      ),
+    ).rejects.toBeInstanceOf(AutomationCancelledError);
   });
 
   it("matches a child frame by normalized origin and path", async () => {

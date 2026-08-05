@@ -1,4 +1,5 @@
 export {
+  MAX_ASSERTION_TEXT_LENGTH,
   WorkflowSchema,
 } from "./workflow.js";
 export type {

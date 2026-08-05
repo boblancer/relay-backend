@@ -1,7 +1,7 @@
 export function navigationWorkflow() {
   const timestamp = "2026-08-02T12:00:00.000Z";
   return {
-    schemaVersion: "1.2",
+    schemaVersion: "1.3",
     id: "11111111-1111-4111-8111-111111111111",
     name: "Service navigation fixture",
     status: "complete",

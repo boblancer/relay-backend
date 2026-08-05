@@ -1,7 +1,7 @@
 # @relay/automation-core
 
 Private, provider-neutral TypeScript automation library for sequential background
-execution of Relay workflow schema 1.2 documents. The caller owns the browser and
+execution of Relay workflow schema 1.3 documents. The caller owns the browser and
 passes an existing Playwright `Page`; this package does not create browser sessions,
 persist runs, or expose a service API.
 
@@ -35,6 +35,16 @@ disabled steps and redundant recorded option clicks, stops at the first failure,
 returns a `completed`, `failed`, or `cancelled` result. Its event and result diagnostics
 contain step IDs, phases, locator kinds, and generic reasons only; they exclude action
 payloads, target values, locator values, URLs, workflow bodies, and source session IDs.
+Locator resolution also verifies recorded tag and input-type fingerprints before using
+a unique visible match. Fill steps recorded against a combobox clear and type
+sequentially to preserve the input-event behavior expected by autocomplete controls;
+ordinary fills and date inputs continue to use Playwright's direct `fill()` action.
+
+Schema 1.3 assertion steps are evaluated once after the preceding action has settled.
+`visible` requires one uniquely resolved visible target. `text_contains` applies
+case-insensitive, whitespace-normalized containment to the target's visible text.
+Assertions emit the `asserting` phase, do not settle afterward, and return only fixed
+privacy-safe failure diagnostics. Earlier workflow schema versions are rejected.
 
 `AutomationRunnerOptions.stepTimeoutMs` controls navigation, locator, action, and wait
 deadlines. It defaults to 15 seconds; remote consumers can select a longer deadline.
@@ -52,8 +62,12 @@ npm pack --dry-run
 ```
 
 The port is behavior-derived from `browser_replay` commit
-`feec00d34ee55064931d105ec72b3d54a7b98bbb`. That repository remains the interactive
+`bbf6409ae154dc8980b2b9d36e834c2c3b849182`. That repository remains the interactive
 editor replay product; changes here do not modify it.
+
+Execution is divided internally between target/frame resolution, canonical step
+actions, and orchestration/settling. `src/execution.ts` remains the compatibility facade
+for the existing internal test and runner imports.
 
 ## Deliberate boundaries
 

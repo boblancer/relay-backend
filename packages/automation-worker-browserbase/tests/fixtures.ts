@@ -34,9 +34,25 @@ export function navigateStep(): Extract<WorkflowStep, { type: "navigate" }> {
   };
 }
 
+export function assertionStep(
+  expected = "ready",
+): Extract<WorkflowStep, { type: "assertion" }> {
+  return {
+    id: "assertion",
+    order: 0,
+    name: "Check result",
+    enabled: true,
+    page: { id: "page-1", url: "https://example.com/form" },
+    target: { candidates: [{ kind: "testId", value: "result", exact: true }] },
+    metadata: { recordedAt, origin: "manual", sensitive: false },
+    type: "assertion",
+    expectation: { kind: "text_contains", expected },
+  };
+}
+
 export function completeWorkflow(steps: WorkflowStep[]): Workflow {
   return {
-    schemaVersion: "1.2",
+    schemaVersion: "1.3",
     id: "05b6300c-27c4-4931-8e89-a4b2223d9d8e",
     name: "Worker fixture",
     status: "complete",

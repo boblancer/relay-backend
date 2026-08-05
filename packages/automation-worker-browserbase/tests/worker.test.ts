@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Browser, BrowserContext, Frame, Page } from "playwright-core";
+import type { Browser, BrowserContext, Frame, Locator, Page } from "playwright-core";
 import {
   BrowserbaseAutomationWorker,
   type BrowserbaseSessionClient,
   type BrowserbaseWorkerDependencies,
   type BrowserbaseWorkerEvent,
 } from "../src/worker.js";
-import { completeWorkflow, navigateStep } from "./fixtures.js";
+import { assertionStep, completeWorkflow, navigateStep } from "./fixtures.js";
 
 function workerFixture(options: {
   createError?: Error;
@@ -16,8 +16,17 @@ function workerFixture(options: {
   closeError?: Error;
   closeThrowsSynchronously?: boolean;
   releaseError?: Error;
+  assertionText?: string;
 } = {}) {
-  const frame = { url: vi.fn(() => "https://example.com/form") } as unknown as Frame;
+  const locator = {
+    count: vi.fn(async () => 1),
+    innerText: vi.fn(async () => options.assertionText ?? "ready"),
+    isVisible: vi.fn(async () => true),
+  } as unknown as Locator;
+  const frame = {
+    getByTestId: vi.fn(() => locator),
+    url: vi.fn(() => "https://example.com/form"),
+  } as unknown as Frame;
   const page = {
     frames: vi.fn(() => [frame]),
     goto: vi.fn(async () => {
@@ -136,6 +145,50 @@ describe("BrowserbaseAutomationWorker", () => {
       cleanupStatus: "not_started",
     });
     expect(fixture.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects schema 1.2 before creating a paid session", async () => {
+    const fixture = workerFixture();
+    const workflow = completeWorkflow([navigateStep()]);
+    const worker = new BrowserbaseAutomationWorker({ apiKey: "api-key" }, fixture.dependencies);
+
+    const outcome = await worker.run({ workflow: { ...workflow, schemaVersion: "1.2" } });
+
+    expect(outcome).toEqual({
+      status: "failed",
+      stage: "validation",
+      code: "invalid_workflow",
+      cleanupStatus: "not_started",
+    });
+    expect(fixture.create).not.toHaveBeenCalled();
+  });
+
+  it("reports assertion failures with a privacy-safe asserting phase", async () => {
+    const fixture = workerFixture({ assertionText: "private observed content" });
+    const events: BrowserbaseWorkerEvent[] = [];
+    const worker = new BrowserbaseAutomationWorker({ apiKey: "api-key" }, fixture.dependencies);
+
+    const outcome = await worker.run({
+      workflow: completeWorkflow([assertionStep("private expected content")]),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(outcome).toMatchObject({
+      status: "failed",
+      stage: "execution",
+      code: "automation_failed",
+      cleanupStatus: "completed",
+      result: {
+        status: "failed",
+        failedStepId: "assertion",
+        phase: "asserting",
+        diagnostic: { message: "The automation assertion did not pass." },
+      },
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "step.phase", phase: "asserting" }),
+    );
+    expect(JSON.stringify({ events, outcome })).not.toMatch(/private expected|private observed/);
   });
 
   it("rejects blank Browserbase credentials before creating a paid session", async () => {

@@ -61,7 +61,7 @@ describe("runCli", () => {
   it("returns a safe validation failure for legacy or unreadable files", async () => {
     const legacy = JSON.stringify({
       ...completeWorkflow([navigateStep()]),
-      schemaVersion: "1.1",
+      schemaVersion: "1.2",
     });
     const legacyFixture = cliFixture({ "/private/legacy.json": legacy });
 

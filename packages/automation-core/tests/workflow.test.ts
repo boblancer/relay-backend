@@ -4,7 +4,7 @@ import { locatorCandidatesForTarget, orderLocatorCandidates } from "../src/workf
 import { clickStep, workflowWith } from "./fixtures.js";
 
 describe("canonical workflow contract", () => {
-  it("accepts a strict canonical 1.2 workflow", () => {
+  it("accepts a strict canonical 1.3 action workflow", () => {
     expect(WorkflowSchema.parse(workflowWith([clickStep()]))).toEqual(workflowWith([clickStep()]));
   });
 
@@ -39,6 +39,45 @@ describe("canonical workflow contract", () => {
     workflow.steps[0]!.metadata.recordedAt = "2026-07-31T13:01:00+01:00";
 
     expect(WorkflowSchema.parse(workflow)).toEqual(workflow);
+  });
+
+  it("accepts schema 1.3 assertions and rejects schema 1.2", () => {
+    const assertion = {
+      ...clickStep(),
+      type: "assertion" as const,
+      expectation: { kind: "text_contains" as const, expected: "Ready for review" },
+    };
+    const workflow = { ...workflowWith([]), steps: [assertion] };
+
+    expect(WorkflowSchema.parse(workflow)).toEqual(workflow);
+    expect(() => WorkflowSchema.parse({ ...workflow, schemaVersion: "1.2" })).toThrow();
+  });
+
+  it("rejects blank, oversized, and action-only fields on assertions", () => {
+    const assertion = {
+      ...clickStep(),
+      type: "assertion" as const,
+      expectation: { kind: "text_contains" as const, expected: "Ready" },
+    };
+    const workflow = { ...workflowWith([]), steps: [assertion] };
+
+    expect(() =>
+      WorkflowSchema.parse({
+        ...workflow,
+        steps: [{ ...assertion, expectation: { kind: "text_contains", expected: "   " } }],
+      }),
+    ).toThrow();
+    expect(() =>
+      WorkflowSchema.parse({
+        ...workflow,
+        steps: [
+          { ...assertion, expectation: { kind: "text_contains", expected: "a".repeat(1_001) } },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      WorkflowSchema.parse({ ...workflow, steps: [{ ...assertion, waitAfter: { delayMs: 1 } }] }),
+    ).toThrow();
   });
 });
 

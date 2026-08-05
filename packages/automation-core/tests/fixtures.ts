@@ -32,7 +32,7 @@ export function navigateStep(order = 0): Extract<WorkflowStep, { type: "navigate
 
 export function workflowWith(steps: WorkflowStep[]): Workflow {
   return {
-    schemaVersion: "1.2",
+    schemaVersion: "1.3",
     id: "05b6300c-27c4-4931-8e89-a4b2223d9d8e",
     name: "Example workflow",
     status: "complete",

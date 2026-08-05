@@ -1,289 +1,36 @@
-import type { Frame, Locator, Page, Request } from "playwright-core";
+import type { Locator, Page, Request } from "playwright-core";
 import {
   locatorCandidatesForTarget,
   orderLocatorCandidates,
   type ElementTarget,
-  type LocatorCandidate,
   type WorkflowStep,
 } from "./workflow.js";
+import {
+  AutomationCancelledError,
+  AutomationExecutionError,
+  cancellableSleep,
+  throwIfCancelled,
+  type AutomationAttempt,
+  type AutomationPhase,
+} from "./execution-errors.js";
+import {
+  AUTOMATION_STEP_TIMEOUT_MS,
+  locatorFor,
+  resolveFrame,
+} from "./target-resolution.js";
+import { executeStepAction, type ActionResult } from "./step-actions.js";
 
-export const AUTOMATION_STEP_TIMEOUT_MS = 15_000;
+export { AutomationCancelledError, AutomationExecutionError } from "./execution-errors.js";
+export type { AutomationAttempt, AutomationPhase } from "./execution-errors.js";
+export { AUTOMATION_STEP_TIMEOUT_MS, resolveTarget } from "./target-resolution.js";
+export type { ResolvedTarget } from "./target-resolution.js";
+export { applyPositionBefore, executeStepAction } from "./step-actions.js";
+export type { ActionResult } from "./step-actions.js";
+
 export const UI_SETTLE_QUIET_MS = 200;
 export const UI_SETTLE_MAX_MS = 5_000;
 export const WAIT_CONDITION_STABLE_MS = 300;
 const waitPollMs = 50;
-
-export type AutomationPhase = "acting" | "settling" | "waiting";
-
-export interface AutomationAttempt {
-  kind: string;
-  reason: string;
-}
-
-export interface ActionResult {
-  locatorKind?: string;
-  attempts: AutomationAttempt[];
-}
-
-export class AutomationCancelledError extends Error {
-  constructor() {
-    super("Automation was cancelled.");
-    this.name = "AutomationCancelledError";
-  }
-}
-
-export class AutomationExecutionError extends Error {
-  constructor(
-    message: string,
-    readonly attempts: AutomationAttempt[] = [],
-    readonly phase?: AutomationPhase,
-  ) {
-    super(message);
-    this.name = "AutomationExecutionError";
-  }
-}
-
-export interface ResolvedTarget {
-  locator: Locator;
-  kind: string;
-  attempts: AutomationAttempt[];
-}
-
-function throwIfCancelled(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new AutomationCancelledError();
-}
-
-async function cancellableSleep(durationMs: number, signal?: AbortSignal): Promise<void> {
-  const deadline = Date.now() + durationMs;
-  while (Date.now() < deadline) {
-    throwIfCancelled(signal);
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.min(waitPollMs, Math.max(0, deadline - Date.now()))),
-    );
-  }
-  throwIfCancelled(signal);
-}
-
-function locatorFor(frame: Frame, candidate: LocatorCandidate): Locator {
-  switch (candidate.kind) {
-    case "testId":
-      return frame.getByTestId(candidate.value);
-    case "role":
-      return frame.getByRole(candidate.value as Parameters<Frame["getByRole"]>[0], {
-        name: candidate.name,
-        exact: candidate.exact,
-      });
-    case "accessibleName":
-    case "label":
-      return frame.getByLabel(candidate.value, { exact: candidate.exact });
-    case "text":
-      return frame.getByText(candidate.value, { exact: candidate.exact });
-    case "css":
-      return frame.locator(candidate.value);
-    case "xpath":
-      return frame.locator(`xpath=${candidate.value}`);
-  }
-}
-
-function normalizedFrameUrl(value: string): string | null {
-  try {
-    const url = new URL(value);
-    const pathname = url.pathname.replace(/\/+$/, "") || "/";
-    return `${url.origin}${pathname}`;
-  } catch {
-    return null;
-  }
-}
-
-function resolveFrame(page: Page, frameUrl?: string, recordedPageUrl?: string): Frame {
-  const mainFrame = page.mainFrame();
-  if (!frameUrl) return mainFrame;
-
-  const recordedFrame = normalizedFrameUrl(frameUrl);
-  const recordedPage = recordedPageUrl ? normalizedFrameUrl(recordedPageUrl) : null;
-  const currentMain = normalizedFrameUrl(mainFrame.url());
-  if (
-    (recordedFrame && recordedPage && recordedFrame === recordedPage) ||
-    mainFrame.url() === frameUrl ||
-    (recordedFrame && currentMain === recordedFrame)
-  ) {
-    return mainFrame;
-  }
-
-  const childFrames = page.frames().filter((candidate) => candidate !== mainFrame);
-  const exact = childFrames.filter((candidate) => candidate.url() === frameUrl);
-  if (exact.length === 1) return exact[0]!;
-  if (exact.length > 1) {
-    throw new AutomationExecutionError("Multiple frames match the recorded frame URL.", [
-      { kind: "frame", reason: "Recorded frame URL matched multiple frames." },
-    ]);
-  }
-  if (recordedFrame) {
-    const normalized = childFrames.filter(
-      (candidate) => normalizedFrameUrl(candidate.url()) === recordedFrame,
-    );
-    if (normalized.length === 1) return normalized[0]!;
-    if (normalized.length > 1) {
-      throw new AutomationExecutionError("Multiple frames match the recorded frame address.", [
-        { kind: "frame", reason: "Recorded frame origin and path matched multiple frames." },
-      ]);
-    }
-  }
-
-  throw new AutomationExecutionError("The recorded frame is not available on this page.", [
-    { kind: "frame", reason: "Recorded frame URL was not found." },
-  ]);
-}
-
-export async function resolveTarget(
-  page: Page,
-  target: ElementTarget,
-  recordedPageUrl?: string,
-  signal?: AbortSignal,
-  stepTimeoutMs = AUTOMATION_STEP_TIMEOUT_MS,
-): Promise<ResolvedTarget> {
-  const frame = resolveFrame(page, target.frameUrl, recordedPageUrl);
-  const attempts: AutomationAttempt[] = [];
-  const candidates = orderLocatorCandidates(locatorCandidatesForTarget(target));
-  const deadline = Date.now() + stepTimeoutMs;
-  do {
-    throwIfCancelled(signal);
-    attempts.splice(0);
-    for (const candidate of candidates) {
-      try {
-        const locator = locatorFor(frame, candidate);
-        const count = await locator.count();
-        throwIfCancelled(signal);
-        if (count !== 1) {
-          attempts.push({
-            kind: candidate.kind,
-            reason: count ? `Matched ${count} elements.` : "No match.",
-          });
-          continue;
-        }
-        if (!(await locator.isVisible())) {
-          attempts.push({ kind: candidate.kind, reason: "The only match is not visible." });
-          continue;
-        }
-        return { locator, kind: candidate.kind, attempts: [...attempts] };
-      } catch (error) {
-        if (error instanceof AutomationCancelledError) throw error;
-        attempts.push({ kind: candidate.kind, reason: "Locator could not be evaluated." });
-      }
-    }
-    await cancellableSleep(250, signal);
-  } while (Date.now() < deadline);
-
-  throw new AutomationExecutionError(
-    "No locator resolved to one visible element within the configured timeout.",
-    attempts,
-  );
-}
-
-export async function applyPositionBefore(
-  page: Page,
-  step: WorkflowStep,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (!step.position) return;
-  throwIfCancelled(signal);
-  const frame = resolveFrame(page, step.position.frameUrl, step.page.url);
-  try {
-    await frame.evaluate(
-      async ({ x, y }) => {
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          window.scrollTo({ left: x, top: y, behavior: "instant" as ScrollBehavior });
-          await new Promise<void>((resolve) => {
-            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-          });
-          if (Math.abs(window.scrollX - x) <= 1 && Math.abs(window.scrollY - y) <= 1) break;
-        }
-      },
-      { x: step.position.x, y: step.position.y },
-    );
-    throwIfCancelled(signal);
-  } catch (error) {
-    if (error instanceof AutomationCancelledError || error instanceof AutomationExecutionError) {
-      throw error;
-    }
-    throw new AutomationExecutionError("The recorded page position could not be restored.");
-  }
-}
-
-export async function executeStepAction(
-  page: Page,
-  step: WorkflowStep,
-  signal?: AbortSignal,
-  stepTimeoutMs = AUTOMATION_STEP_TIMEOUT_MS,
-): Promise<ActionResult> {
-  await applyPositionBefore(page, step, signal);
-  throwIfCancelled(signal);
-  try {
-    if (step.type === "navigate") {
-      await page.goto(step.payload.url, {
-        waitUntil: "domcontentloaded",
-        timeout: stepTimeoutMs,
-      });
-      throwIfCancelled(signal);
-      return { attempts: [] };
-    }
-
-    const resolved = await resolveTarget(page, step.target, step.page.url, signal, stepTimeoutMs);
-    const options = { timeout: stepTimeoutMs };
-    switch (step.type) {
-      case "click":
-        await resolved.locator.click(options);
-        break;
-      case "fill":
-      case "set_date":
-        await resolved.locator.fill(step.payload.value, options);
-        break;
-      case "select":
-        try {
-          await resolved.locator.selectOption({ value: step.payload.value }, options);
-        } catch (error) {
-          if (!step.payload.label) throw error;
-          await resolved.locator.selectOption({ label: step.payload.label }, options);
-        }
-        break;
-      case "check":
-        await resolved.locator.check(options);
-        break;
-      case "uncheck":
-        await resolved.locator.uncheck(options);
-        break;
-      case "keypress":
-        await resolved.locator.press([...step.payload.modifiers, step.payload.key].join("+"), options);
-        break;
-      case "submit": {
-        const submitted = await resolved.locator.evaluate(
-          (element) => {
-            if (element instanceof HTMLFormElement) {
-              element.requestSubmit();
-              return true;
-            }
-            const form = element instanceof HTMLElement ? element.closest("form") : null;
-            if (form) form.requestSubmit();
-            return Boolean(form);
-          },
-          undefined,
-          options,
-        );
-        if (!submitted) {
-          throw new AutomationExecutionError("The submit target is not inside a form.");
-        }
-        break;
-      }
-    }
-    throwIfCancelled(signal);
-    return { locatorKind: resolved.kind, attempts: resolved.attempts };
-  } catch (error) {
-    if (error instanceof AutomationCancelledError || error instanceof AutomationExecutionError) {
-      throw error;
-    }
-    throw new AutomationExecutionError("The automation action could not be completed.");
-  }
-}
 
 export class AutomationExecutor {
   private readonly activeRequests = new Set<Request>();
@@ -498,13 +245,13 @@ export class AutomationExecutor {
     onPhase?: (phase: AutomationPhase) => void,
   ): Promise<ActionResult> {
     this.startActivityTracking();
-    let phase: AutomationPhase = "acting";
+    let phase: AutomationPhase = step.type === "assertion" ? "asserting" : "acting";
     const enterPhase = (next: AutomationPhase) => {
       phase = next;
       onPhase?.(next);
     };
     try {
-      enterPhase("acting");
+      enterPhase(phase);
       this.lastNetworkActivity = Date.now();
       const result = await executeStepAction(
         this.page,
@@ -512,6 +259,10 @@ export class AutomationExecutor {
         this.signal,
         this.stepTimeoutMs,
       );
+      if (step.type === "assertion") {
+        throwIfCancelled(this.signal);
+        return result;
+      }
       enterPhase("settling");
       await this.waitForAutomaticSettle();
       if (step.waitAfter?.delayMs) {
@@ -534,7 +285,9 @@ export class AutomationExecutor {
         throw new AutomationExecutionError(error.message, error.attempts, phase);
       }
       const message =
-        phase === "acting"
+        phase === "asserting"
+          ? "The automation assertion did not pass."
+          : phase === "acting"
           ? "The automation action could not be completed."
           : phase === "settling"
             ? "The page did not settle after the automation action."

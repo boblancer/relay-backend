@@ -17,6 +17,7 @@ function runnerPage(failingName?: string) {
         if (name === failingName) throw new Error("private browser failure");
       }),
       count: vi.fn(async () => 1),
+      innerText: vi.fn(async () => "Ready for review"),
       isVisible: vi.fn(async () => true),
       selectOption: vi.fn(async () => {
         calls.push(`select:${name}`);
@@ -157,6 +158,26 @@ describe("AutomationRunner", () => {
     expect(JSON.stringify({ result, events })).not.toMatch(
       /private browser failure|private\.example|token=secret|private-session/,
     );
+  });
+
+  it("reports assertions with the asserting phase and does not settle afterward", async () => {
+    const { page } = runnerPage();
+    const events: AutomationEvent[] = [];
+    const { waitAfter: _waitAfter, ...assertionBase } = clickStep();
+    const assertion: WorkflowStep = {
+      ...assertionBase,
+      type: "assertion",
+      expectation: { kind: "text_contains", expected: "ready" },
+    };
+
+    const result = await new AutomationRunner(page, {
+      onEvent: (event) => events.push(event),
+    }).run(preflightAutomation(workflowWith([assertion])));
+
+    expect(result).toMatchObject({ status: "completed", passedSteps: 1 });
+    expect(
+      events.filter((event) => event.type === "step.phase").map((event) => event.phase),
+    ).toEqual(["asserting"]);
   });
 
   it("returns a cancelled result instead of throwing", async () => {
