@@ -14,8 +14,10 @@ from pydantic import ValidationError
 from relay_backend import contract as contracts
 from relay_backend.data.database import Database
 from relay_backend.main import create_app
+from relay_backend.services.namespaces import NamespaceService
 from relay_backend.services.workflows import WorkflowService
 from relay_backend.settings import Settings
+from relay_backend.storage import LocalBlobStorage
 from tests.conftest import DATABASE_URL
 from tests.test_models import workflow_document
 
@@ -23,13 +25,16 @@ MAX_REQUEST_BYTES = 1_048_576
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def client(tmp_path) -> Iterator[TestClient]:
     database = Database(DATABASE_URL, min_size=1, max_size=6)
     database.open()
+    storage = LocalBlobStorage(tmp_path)
     service = WorkflowService(
         database,
+        storage,
         clock=lambda: datetime(2026, 7, 30, 12, tzinfo=UTC),
     )
+    namespace_service = NamespaceService(database)
     settings = Settings(
         database_url=DATABASE_URL,
         basic_auth_username="relay",
@@ -37,7 +42,7 @@ def client() -> Iterator[TestClient]:
         _env_file=None,
     )
     token = base64.b64encode(b"relay:test-password").decode()
-    app = create_app(settings=settings, service=service)
+    app = create_app(settings=settings, service=service, namespace_service=namespace_service)
     try:
         with TestClient(
             app,
@@ -46,6 +51,12 @@ def client() -> Iterator[TestClient]:
             yield test_client
     finally:
         database.close()
+
+
+def _create_namespace(client: TestClient) -> int:
+    response = client.post("/v1/namespaces", json={"name": f"ns-{uuid4().hex[:8]}"})
+    assert response.status_code == 201
+    return response.json()["id"]
 
 
 def save_payload(created: dict) -> dict:
@@ -97,12 +108,13 @@ def test_settings_ignore_dotenv_local(tmp_path, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_api_requires_shared_basic_credentials(client: TestClient) -> None:
+    ns_id = _create_namespace(client)
     client.headers.pop("Authorization")
 
-    missing = client.get("/v1/workflows")
-    wrong = client.get("/v1/workflows", auth=("relay", "wrong-password"))
+    missing = client.get(f"/v1/namespaces/{ns_id}/workflows")
+    wrong = client.get(f"/v1/namespaces/{ns_id}/workflows", auth=("relay", "wrong-password"))
     malformed = client.get(
-        "/v1/workflows",
+        f"/v1/namespaces/{ns_id}/workflows",
         headers={"Authorization": "Basic not-base64"},
     )
 
@@ -121,9 +133,10 @@ def test_api_requires_shared_basic_credentials(client: TestClient) -> None:
 
 
 def test_create_get_and_list_follow_the_contract(client: TestClient) -> None:
-    missing_key = client.post("/v1/workflows")
+    ns_id = _create_namespace(client)
+    missing_key = client.post(f"/v1/namespaces/{ns_id}/workflows")
     created_response = client.post(
-        "/v1/workflows",
+        f"/v1/namespaces/{ns_id}/workflows",
         headers={"Idempotency-Key": str(uuid4())},
     )
 
@@ -134,8 +147,8 @@ def test_create_get_and_list_follow_the_contract(client: TestClient) -> None:
     assert created["name"] == "Untitled recording"
     assert created["revision"] == 1
 
-    loaded = client.get(f"/v1/workflows/{created['id']}")
-    listed = client.get("/v1/workflows")
+    loaded = client.get(f"/v1/namespaces/{ns_id}/workflows/{created['id']}")
+    listed = client.get(f"/v1/namespaces/{ns_id}/workflows")
 
     assert loaded.status_code == 200
     assert loaded.json() == created
@@ -156,15 +169,16 @@ def test_create_get_and_list_follow_the_contract(client: TestClient) -> None:
 def test_create_rejects_an_unexpected_body_without_consuming_the_key(
     client: TestClient,
 ) -> None:
+    ns_id = _create_namespace(client)
     key = str(uuid4())
 
     rejected = client.post(
-        "/v1/workflows",
+        f"/v1/namespaces/{ns_id}/workflows",
         headers={"Idempotency-Key": key},
         json={"unexpected": "sensitive-value"},
     )
     retried = client.post(
-        "/v1/workflows",
+        f"/v1/namespaces/{ns_id}/workflows",
         headers={"Idempotency-Key": key},
     )
 
@@ -175,34 +189,35 @@ def test_create_rejects_an_unexpected_body_without_consuming_the_key(
 
 
 def test_save_maps_revision_and_idempotency_conflicts(client: TestClient) -> None:
+    ns_id = _create_namespace(client)
     created = client.post(
-        "/v1/workflows",
+        f"/v1/namespaces/{ns_id}/workflows",
         headers={"Idempotency-Key": str(uuid4())},
     ).json()
     payload = save_payload(created)
     save_key = str(uuid4())
 
     saved = client.put(
-        f"/v1/workflows/{created['id']}",
+        f"/v1/namespaces/{ns_id}/workflows/{created['id']}",
         headers={"Idempotency-Key": save_key},
         json=payload,
     )
     replayed = client.put(
-        f"/v1/workflows/{created['id']}",
+        f"/v1/namespaces/{ns_id}/workflows/{created['id']}",
         headers={"Idempotency-Key": save_key},
         json=payload,
     )
     changed_payload = deepcopy(payload)
     changed_payload["workflow"]["name"] = "Different request"
     key_conflict = client.put(
-        f"/v1/workflows/{created['id']}",
+        f"/v1/namespaces/{ns_id}/workflows/{created['id']}",
         headers={"Idempotency-Key": save_key},
         json=changed_payload,
     )
     stale_payload = save_payload(saved.json())
     stale_payload["expectedRevision"] = 1
     revision_conflict = client.put(
-        f"/v1/workflows/{created['id']}",
+        f"/v1/namespaces/{ns_id}/workflows/{created['id']}",
         headers={"Idempotency-Key": str(uuid4())},
         json=stale_payload,
     )
@@ -217,10 +232,11 @@ def test_save_maps_revision_and_idempotency_conflicts(client: TestClient) -> Non
 
 
 def test_validation_errors_are_safe_and_never_use_422(client: TestClient) -> None:
-    invalid_uuid = client.get("/v1/workflows/not-a-uuid")
+    ns_id = _create_namespace(client)
+    invalid_uuid = client.get(f"/v1/namespaces/{ns_id}/workflows/not-a-uuid")
     body = {"secretExtra": "do-not-echo"}
     invalid_body = client.put(
-        f"/v1/workflows/{uuid4()}",
+        f"/v1/namespaces/{ns_id}/workflows/{uuid4()}",
         headers={"Idempotency-Key": str(uuid4())},
         json=body,
     )
@@ -237,7 +253,8 @@ def test_validation_errors_are_safe_and_never_use_422(client: TestClient) -> Non
 
 
 def test_missing_workflow_returns_contract_not_found(client: TestClient) -> None:
-    response = client.get(f"/v1/workflows/{uuid4()}")
+    ns_id = _create_namespace(client)
+    response = client.get(f"/v1/namespaces/{ns_id}/workflows/{uuid4()}")
 
     assert response.status_code == 404
     assert response.json() == {
@@ -249,13 +266,14 @@ def test_missing_workflow_returns_contract_not_found(client: TestClient) -> None
 
 
 def test_finish_requires_at_least_one_step(client: TestClient) -> None:
+    ns_id = _create_namespace(client)
     created = client.post(
-        "/v1/workflows",
+        f"/v1/namespaces/{ns_id}/workflows",
         headers={"Idempotency-Key": str(uuid4())},
     ).json()
 
     response = client.post(
-        f"/v1/workflows/{created['id']}/finish",
+        f"/v1/namespaces/{ns_id}/workflows/{created['id']}/finish",
         headers={"Idempotency-Key": str(uuid4())},
         json={"workflow": created, "expectedRevision": 1},
     )
@@ -268,8 +286,9 @@ def test_finish_requires_at_least_one_step(client: TestClient) -> None:
 def test_request_body_limit_accepts_exact_boundary_and_rejects_one_more_byte(
     client: TestClient,
 ) -> None:
+    ns_id = _create_namespace(client)
     created = client.post(
-        "/v1/workflows",
+        f"/v1/namespaces/{ns_id}/workflows",
         headers={"Idempotency-Key": str(uuid4())},
     ).json()
     payload = save_payload(created)
@@ -281,7 +300,7 @@ def test_request_body_limit_accepts_exact_boundary_and_rejects_one_more_byte(
     assert len(exact_body) == MAX_REQUEST_BYTES
 
     accepted = client.put(
-        f"/v1/workflows/{created['id']}",
+        f"/v1/namespaces/{ns_id}/workflows/{created['id']}",
         headers={
             "Content-Type": "application/json",
             "Idempotency-Key": str(uuid4()),
@@ -290,7 +309,7 @@ def test_request_body_limit_accepts_exact_boundary_and_rejects_one_more_byte(
     )
     oversized = exact_body + b" "
     rejected = client.put(
-        f"/v1/workflows/{created['id']}",
+        f"/v1/namespaces/{ns_id}/workflows/{created['id']}",
         headers={
             "Content-Type": "application/json",
             "Idempotency-Key": str(uuid4()),
@@ -311,10 +330,19 @@ def test_unavailable_pool_returns_safe_503() -> None:
         basic_auth_password="test-password",
         _env_file=None,
     )
-    app = create_app(settings=settings, service=WorkflowService(database))
+    namespace_service = NamespaceService(database)
+    app = create_app(
+        settings=settings,
+        service=WorkflowService(database),
+        namespace_service=namespace_service,
+    )
 
     with TestClient(app, raise_server_exceptions=False) as unavailable_client:
-        response = unavailable_client.get("/v1/workflows", auth=("relay", "test-password"))
+        # Need a namespace_id to hit the workflow route
+        # Since DB is not open, we test with a made-up namespace_id
+        response = unavailable_client.get(
+            "/v1/namespaces/1/workflows", auth=("relay", "test-password")
+        )
 
     assert response.status_code == 503
     assert response.json() == {
@@ -327,7 +355,7 @@ def test_unavailable_pool_returns_safe_503() -> None:
 
 def test_unexpected_failure_returns_safe_500() -> None:
     class ExplodingService:
-        def list(self) -> None:
+        def list(self, namespace_id: int) -> None:
             raise RuntimeError("sensitive database detail")
 
     settings = Settings(
@@ -339,7 +367,9 @@ def test_unexpected_failure_returns_safe_500() -> None:
     app = create_app(settings=settings, service=ExplodingService())
 
     with TestClient(app, raise_server_exceptions=False) as exploding_client:
-        response = exploding_client.get("/v1/workflows", auth=("relay", "test-password"))
+        response = exploding_client.get(
+            "/v1/namespaces/1/workflows", auth=("relay", "test-password")
+        )
 
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "internal"
@@ -359,9 +389,11 @@ def test_served_openapi_is_the_authenticated_repository_contract(client: TestCli
         "description": "Shared credentials configured by the backend operator.",
     }
     assert set(contract["paths"]) == {
-        "/v1/workflows",
-        "/v1/workflows/{workflowId}",
-        "/v1/workflows/{workflowId}/finish",
+        "/v1/namespaces/{namespaceId}/workflows",
+        "/v1/namespaces/{namespaceId}/workflows/{workflowId}",
+        "/v1/namespaces/{namespaceId}/workflows/{workflowId}/finish",
+        "/v1/namespaces/{namespaceId}/workflows/{workflowId}/upload",
+        "/v1/namespaces/{namespaceId}/workflows/{workflowId}/download",
     }
 
 

@@ -38,7 +38,10 @@ security:
   - basicAuth: []
 
 paths:
-  /v1/workflows:
+  /v1/namespaces/{namespaceId}/workflows:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+
     get:
       operationId: listWorkflows
       tags:
@@ -105,8 +108,9 @@ paths:
         "500":
           $ref: "#/components/responses/Internal"
 
-  /v1/workflows/{workflowId}:
+  /v1/namespaces/{namespaceId}/workflows/{workflowId}:
     parameters:
+      - $ref: "#/components/parameters/NamespaceId"
       - $ref: "#/components/parameters/WorkflowId"
 
     get:
@@ -177,8 +181,9 @@ paths:
         "500":
           $ref: "#/components/responses/Internal"
 
-  /v1/workflows/{workflowId}/finish:
+  /v1/namespaces/{namespaceId}/workflows/{workflowId}/finish:
     parameters:
+      - $ref: "#/components/parameters/NamespaceId"
       - $ref: "#/components/parameters/WorkflowId"
 
     post:
@@ -224,6 +229,72 @@ paths:
         "500":
           $ref: "#/components/responses/Internal"
 
+  /v1/namespaces/{namespaceId}/workflows/{workflowId}/upload:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+      - $ref: "#/components/parameters/WorkflowId"
+
+    post:
+      operationId: uploadWorkflowFile
+      tags:
+        - Workflows
+      summary: Upload a file to a workflow
+      description: Uploads a file and associates it with the workflow.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Workflow updated with file URL.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fileUrl:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/namespaces/{namespaceId}/workflows/{workflowId}/download:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+      - $ref: "#/components/parameters/WorkflowId"
+
+    get:
+      operationId: downloadWorkflowFile
+      tags:
+        - Workflows
+      summary: Download a workflow's file
+      description: Downloads the file associated with the workflow.
+      responses:
+        "200":
+          description: The file content.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+
 components:
   securitySchemes:
     basicAuth:
@@ -232,6 +303,14 @@ components:
       description: Shared credentials configured by the backend operator.
 
   parameters:
+    NamespaceId:
+      name: namespaceId
+      in: path
+      required: true
+      description: Namespace serial ID.
+      schema:
+        type: integer
+
     WorkflowId:
       name: workflowId
       in: path

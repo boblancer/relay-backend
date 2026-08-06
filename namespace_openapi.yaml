@@ -1,18 +1,17 @@
 openapi: 3.1.0
 info:
-  title: Namespace Blob Storage API
+  title: Namespace Storage API
   version: 1.0.0
-  summary: Namespace-scoped blob storage for robot recordings.
+  summary: Namespace management for workflow organization.
   description: |
-    Provides namespace-scoped storage for binary records (robot video,
-    proprioception logs, etc.). Each namespace contains named records, and
-    each record can hold one uploaded file.
+    Provides namespace (workspace) management. Each namespace contains
+    workflows that are scoped to it.
 
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 
 tags:
   - name: Namespaces
-    description: Namespace and record management with blob storage.
+    description: Namespace management.
 
 security:
   - basicAuth: []
@@ -89,144 +88,6 @@ paths:
         "500":
           $ref: "#/components/responses/Internal"
 
-  /v1/namespaces/{namespaceId}/records:
-    parameters:
-      - $ref: "#/components/parameters/NamespaceId"
-
-    get:
-      operationId: listRecords
-      tags:
-        - Namespaces
-      summary: List records in a namespace
-      description: Returns all records in the namespace ordered by creation time descending.
-      responses:
-        "200":
-          description: List of records.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Record"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/Internal"
-
-    post:
-      operationId: createRecord
-      tags:
-        - Namespaces
-      summary: Create a record
-      description: Creates a new record in the namespace.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateRecordRequest"
-      responses:
-        "201":
-          description: Record created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Record"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "409":
-          $ref: "#/components/responses/DuplicateName"
-        "500":
-          $ref: "#/components/responses/Internal"
-
-  /v1/namespaces/{namespaceId}/records/{recordId}:
-    parameters:
-      - $ref: "#/components/parameters/NamespaceId"
-      - $ref: "#/components/parameters/RecordId"
-
-    get:
-      operationId: getRecord
-      tags:
-        - Namespaces
-      summary: Get a record
-      description: Returns a single record by ID.
-      responses:
-        "200":
-          description: The record.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Record"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/Internal"
-
-  /v1/namespaces/{namespaceId}/records/{recordId}/upload:
-    parameters:
-      - $ref: "#/components/parameters/NamespaceId"
-      - $ref: "#/components/parameters/RecordId"
-
-    post:
-      operationId: uploadFile
-      tags:
-        - Namespaces
-      summary: Upload a file to a record
-      description: Uploads a file and associates it with the record.
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required:
-                - file
-              properties:
-                file:
-                  type: string
-                  format: binary
-      responses:
-        "200":
-          description: Record updated with file URL.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Record"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/Internal"
-
-  /v1/namespaces/{namespaceId}/records/{recordId}/download:
-    parameters:
-      - $ref: "#/components/parameters/NamespaceId"
-      - $ref: "#/components/parameters/RecordId"
-
-    get:
-      operationId: downloadFile
-      tags:
-        - Namespaces
-      summary: Download a record's file
-      description: Downloads the file associated with the record.
-      responses:
-        "200":
-          description: The file content.
-          content:
-            application/octet-stream:
-              schema:
-                type: string
-                format: binary
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/Internal"
-
 components:
   securitySchemes:
     basicAuth:
@@ -240,14 +101,6 @@ components:
       in: path
       required: true
       description: Namespace serial ID.
-      schema:
-        type: integer
-
-    RecordId:
-      name: recordId
-      in: path
-      required: true
-      description: Record serial ID.
       schema:
         type: integer
 
@@ -350,43 +203,7 @@ components:
           type: string
           format: date-time
 
-    Record:
-      type: object
-      additionalProperties: false
-      required:
-        - id
-        - namespaceId
-        - name
-        - createdAt
-        - updatedAt
-      properties:
-        id:
-          type: integer
-        namespaceId:
-          type: integer
-        name:
-          type: string
-          minLength: 1
-        fileUrl:
-          type: string
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-
     CreateNamespaceRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - name
-      properties:
-        name:
-          type: string
-          minLength: 1
-
-    CreateRecordRequest:
       type: object
       additionalProperties: false
       required:

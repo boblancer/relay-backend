@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Iterator
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,9 +20,9 @@ from tests.conftest import DATABASE_URL
 def client(tmp_path) -> Iterator[TestClient]:
     database = Database(DATABASE_URL, min_size=1, max_size=6)
     database.open()
-    service = WorkflowService(database)
     storage = LocalBlobStorage(tmp_path)
-    namespace_service = NamespaceService(database, storage)
+    service = WorkflowService(database, storage)
+    namespace_service = NamespaceService(database)
     settings = Settings(
         database_url=DATABASE_URL,
         basic_auth_username="relay",
@@ -80,62 +81,16 @@ def test_get_nonexistent_namespace(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_create_record(client: TestClient) -> None:
-    ns = client.post("/v1/namespaces", json={"name": "ns-for-record"}).json()
-
-    response = client.post(
-        f"/v1/namespaces/{ns['id']}/records",
-        json={"name": "my-record"},
-    )
-
-    assert response.status_code == 201
-    body = response.json()
-    assert isinstance(body["id"], int)
-    assert body["namespaceId"] == ns["id"]
-
-
-def test_list_records(client: TestClient) -> None:
-    ns = client.post("/v1/namespaces", json={"name": "ns-list"}).json()
-    client.post(f"/v1/namespaces/{ns['id']}/records", json={"name": "rec-1"})
-    client.post(f"/v1/namespaces/{ns['id']}/records", json={"name": "rec-2"})
-
-    response = client.get(f"/v1/namespaces/{ns['id']}/records")
-
-    assert response.status_code == 200
-    assert len(response.json()) == 2
-
-
-def test_get_record(client: TestClient) -> None:
-    ns = client.post("/v1/namespaces", json={"name": "ns-get-rec"}).json()
-    created = client.post(
-        f"/v1/namespaces/{ns['id']}/records",
-        json={"name": "get-me"},
-    ).json()
-
-    response = client.get(f"/v1/namespaces/{ns['id']}/records/{created['id']}")
-
-    assert response.status_code == 200
-    assert response.json()["name"] == "get-me"
-
-
-def test_get_nonexistent_record(client: TestClient) -> None:
-    ns = client.post("/v1/namespaces", json={"name": "ns-missing-rec"}).json()
-
-    response = client.get(f"/v1/namespaces/{ns['id']}/records/999999")
-
-    assert response.status_code == 404
-
-
 def test_upload_and_download_file(client: TestClient) -> None:
     ns = client.post("/v1/namespaces", json={"name": "ns-upload"}).json()
-    rec = client.post(
-        f"/v1/namespaces/{ns['id']}/records",
-        json={"name": "file-rec"},
+    wf = client.post(
+        f"/v1/namespaces/{ns['id']}/workflows",
+        headers={"Idempotency-Key": str(uuid4())},
     ).json()
     content = b"hello world binary data"
 
     upload_response = client.post(
-        f"/v1/namespaces/{ns['id']}/records/{rec['id']}/upload",
+        f"/v1/namespaces/{ns['id']}/workflows/{wf['id']}/upload",
         files={"file": ("test.bin", content, "application/octet-stream")},
     )
 
@@ -143,7 +98,7 @@ def test_upload_and_download_file(client: TestClient) -> None:
     assert "fileUrl" in upload_response.json()
 
     download_response = client.get(
-        f"/v1/namespaces/{ns['id']}/records/{rec['id']}/download",
+        f"/v1/namespaces/{ns['id']}/workflows/{wf['id']}/download",
     )
 
     assert download_response.status_code == 200
@@ -152,13 +107,13 @@ def test_upload_and_download_file(client: TestClient) -> None:
 
 def test_download_without_upload(client: TestClient) -> None:
     ns = client.post("/v1/namespaces", json={"name": "ns-no-upload"}).json()
-    rec = client.post(
-        f"/v1/namespaces/{ns['id']}/records",
-        json={"name": "empty-rec"},
+    wf = client.post(
+        f"/v1/namespaces/{ns['id']}/workflows",
+        headers={"Idempotency-Key": str(uuid4())},
     ).json()
 
     response = client.get(
-        f"/v1/namespaces/{ns['id']}/records/{rec['id']}/download",
+        f"/v1/namespaces/{ns['id']}/workflows/{wf['id']}/download",
     )
 
     assert response.status_code == 404

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from relay_backend.data.database import Database
 from relay_backend.data.workflow_repository import WorkflowRepository
 from relay_backend.errors import (
+    BlobNotFoundError,
     InternalPersistenceError,
     PersistenceUnavailableError,
     RevisionConflictError,
@@ -29,29 +30,34 @@ from relay_backend.models.workflows import (
     canonical_request_hash,
     to_workflow_summary,
 )
+from relay_backend.storage import BlobStorage
 
 
 class WorkflowService:
     def __init__(
         self,
         database: Database,
+        storage: BlobStorage | None = None,
         *,
         repository: WorkflowRepository | None = None,
         clock: Callable[[], datetime] | None = None,
         uuid_factory: Callable[[], UUID] | None = None,
     ) -> None:
         self.database = database
+        self.storage = storage
         self.repository = repository or WorkflowRepository()
         self.clock = clock or (lambda: datetime.now(UTC))
         self.uuid_factory = uuid_factory or uuid4
 
-    def list(self) -> WorkflowListResponse:
+    def list(self, namespace_id: int) -> WorkflowListResponse:
         with self._transaction() as connection:
-            return WorkflowListResponse(workflows=self.repository.list_summaries(connection))
+            return WorkflowListResponse(
+                workflows=self.repository.list_summaries(connection, namespace_id)
+            )
 
-    def create(self, idempotency_key: UUID) -> Workflow:
+    def create(self, namespace_id: int, idempotency_key: UUID) -> Workflow:
         method = "POST"
-        path = "/v1/workflows"
+        path = f"/v1/namespaces/{namespace_id}/workflows"
         request_hash = canonical_request_hash(method, path)
         with self._transaction() as connection:
             replay = self.repository.claim_idempotency(
@@ -76,7 +82,8 @@ class WorkflowService:
                 source=WorkflowSource(provider="browserbase", session_id=""),
                 steps=[],
             )
-            self.repository.insert(connection, workflow, to_workflow_summary(workflow))
+            summary = to_workflow_summary(workflow)
+            self.repository.insert(connection, workflow, summary, namespace_id)
             self.repository.complete_idempotency(
                 connection,
                 key=idempotency_key,
@@ -91,6 +98,7 @@ class WorkflowService:
 
     def save(
         self,
+        namespace_id: int,
         workflow_id: UUID,
         request: SaveWorkflowRequest,
         idempotency_key: UUID,
@@ -98,7 +106,7 @@ class WorkflowService:
         request = _revalidate_request(request)
         _require_matching_id(workflow_id, request.workflow)
         method = "PUT"
-        path = f"/v1/workflows/{workflow_id}"
+        path = f"/v1/namespaces/{namespace_id}/workflows/{workflow_id}"
         with self._transaction() as connection:
             replay = self.repository.claim_idempotency(
                 connection,
@@ -130,6 +138,7 @@ class WorkflowService:
 
     def finish(
         self,
+        namespace_id: int,
         workflow_id: UUID,
         request: SaveWorkflowRequest,
         idempotency_key: UUID,
@@ -139,7 +148,7 @@ class WorkflowService:
         if not request.workflow.steps:
             raise ValidationFailedError("Add at least one workflow step before finishing.")
         method = "POST"
-        path = f"/v1/workflows/{workflow_id}/finish"
+        path = f"/v1/namespaces/{namespace_id}/workflows/{workflow_id}/finish"
         with self._transaction() as connection:
             replay = self.repository.claim_idempotency(
                 connection,
@@ -175,6 +184,26 @@ class WorkflowService:
                 body=_workflow_json(finished),
             )
             return finished
+
+    def upload_file(
+        self, namespace_id: int, workflow_id: UUID, filename: str, data: bytes
+    ) -> str:
+        if self.storage is None:
+            raise InternalPersistenceError
+        file_url = self.storage.save(namespace_id, str(workflow_id), filename, data)
+        with self._transaction() as connection:
+            self.repository.update_file_url(connection, workflow_id, file_url)
+        return file_url
+
+    def download_file(
+        self, namespace_id: int, workflow_id: UUID, filename: str
+    ) -> bytes:
+        if self.storage is None:
+            raise InternalPersistenceError
+        try:
+            return self.storage.read(namespace_id, str(workflow_id), filename)
+        except FileNotFoundError as error:
+            raise BlobNotFoundError from error
 
     def _next_snapshot(
         self,

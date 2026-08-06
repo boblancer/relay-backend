@@ -14,18 +14,5 @@ class Namespace(ApiModel):
     updated_at: datetime
 
 
-class Record(ApiModel):
-    id: int
-    namespace_id: int
-    name: str = Field(min_length=1)
-    file_url: str | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
 class CreateNamespaceRequest(ApiModel):
-    name: str = Field(min_length=1)
-
-
-class CreateRecordRequest(ApiModel):
     name: str = Field(min_length=1)

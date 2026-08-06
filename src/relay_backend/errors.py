@@ -45,11 +45,6 @@ class NamespaceNotFoundError(WorkflowError):
         super().__init__("The namespace was not found.")
 
 
-class RecordNotFoundError(WorkflowError):
-    def __init__(self) -> None:
-        super().__init__("The record was not found.")
-
-
 class DuplicateNameError(WorkflowError):
     def __init__(self) -> None:
         super().__init__("A resource with that name already exists.")

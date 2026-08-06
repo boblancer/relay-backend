@@ -26,7 +26,6 @@ from relay_backend.errors import (
     IdempotencyConflictError,
     NamespaceNotFoundError,
     PersistenceUnavailableError,
-    RecordNotFoundError,
     RevisionConflictError,
     ValidationFailedError,
     WorkflowError,
@@ -69,10 +68,10 @@ def create_app(
 
         database = Database(runtime_settings.database_url)
         database.open()
-        app.state.workflow_service = WorkflowService(database)
 
         storage = _create_storage(runtime_settings)
-        app.state.namespace_service = NamespaceService(database, storage)
+        app.state.workflow_service = WorkflowService(database, storage)
+        app.state.namespace_service = NamespaceService(database)
 
         try:
             yield
@@ -169,7 +168,7 @@ def _install_error_handlers(app: FastAPI) -> None:
             return _error_response(400, "validation_failed", str(error))
         if isinstance(
             error,
-            (WorkflowNotFoundError, NamespaceNotFoundError, RecordNotFoundError, BlobNotFoundError),
+            (WorkflowNotFoundError, NamespaceNotFoundError, BlobNotFoundError),
         ):
             return _error_response(404, "not_found", str(error))
         if isinstance(error, RevisionConflictError):

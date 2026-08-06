@@ -1,4 +1,4 @@
-"""Add namespace and record tables.
+"""Add namespaces table and namespace_id/file_url columns to workflows.
 
 Revision ID: 0002
 Revises: 0001
@@ -35,35 +35,24 @@ def upgrade() -> None:
         ),
     )
 
-    op.create_table(
-        "records",
-        sa.Column("id", sa.Integer(), autoincrement=True, primary_key=True),
+    op.add_column(
+        "workflows",
         sa.Column(
             "namespace_id",
             sa.Integer(),
             sa.ForeignKey("namespaces.id", ondelete="CASCADE"),
             nullable=False,
         ),
-        sa.Column("name", sa.Text(), nullable=False),
-        sa.Column("file_url", sa.Text(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.text("CURRENT_TIMESTAMP"),
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.text("CURRENT_TIMESTAMP"),
-        ),
-        sa.UniqueConstraint("namespace_id", "name", name="uq_records_namespace_name"),
     )
-    op.create_index("ix_records_namespace_id", "records", ["namespace_id"])
+    op.add_column(
+        "workflows",
+        sa.Column("file_url", sa.Text(), nullable=True),
+    )
+    op.create_index("ix_workflows_namespace_id", "workflows", ["namespace_id"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_records_namespace_id", table_name="records")
-    op.drop_table("records")
+    op.drop_index("ix_workflows_namespace_id", table_name="workflows")
+    op.drop_column("workflows", "file_url")
+    op.drop_column("workflows", "namespace_id")
     op.drop_table("namespaces")
