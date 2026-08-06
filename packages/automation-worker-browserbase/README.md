@@ -58,6 +58,11 @@ a 60-second timeout. The worker does not retry actions because repeating a click
 submission could duplicate an external side effect.
 Assertions execute once, emit the `asserting` phase, and are not retried.
 
+Library callers may supply `onTerminalScreenshot` to receive one best-effort PNG of the
+visible viewport after the automation result is known and before browser cleanup. The
+capture and callback have a two-second budget and cannot replace the run outcome. The
+worker does not store or publish the image; that remains the caller's responsibility.
+
 ## Verification
 
 ```bash

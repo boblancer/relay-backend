@@ -10,11 +10,13 @@ import type { AutomationServiceConfig } from "../src/config.js";
 import type { InngestRunExecutor } from "../src/inngest.js";
 
 const config: AutomationServiceConfig = {
+  artifactDirectory: "/tmp/relay-test-artifacts",
   host: "127.0.0.1",
   inngestDev: false,
   port: 8080,
   maxConcurrentRuns: 1,
   retryAfterSeconds: 2,
+  screenshotsEnabled: false,
   shutdownGraceMs: 30_000,
   worker: {
     apiKey: "private-browserbase-key",
@@ -112,6 +114,34 @@ describe("automation service contract", () => {
 
     await disabled.service.shutdown();
     await enabled.service.shutdown();
+  });
+
+  it("does not request terminal screenshots for Inngest work", async () => {
+    let inngestExecute!: InngestRunExecutor;
+    let observedInput!: BrowserbaseRunInput;
+    const run = vi.fn(async (input: BrowserbaseRunInput) => {
+      observedInput = input;
+      return completedOutcome;
+    });
+    const service = buildAutomationService(
+      { ...config, inngestDev: true, screenshotsEnabled: true },
+      {
+        createWorker: vi.fn(() => ({ run })) as unknown as (
+          workerConfig: BrowserbaseWorkerConfig,
+        ) => BrowserbaseAutomationWorker,
+        log: vi.fn(),
+        randomUUID: () => "11111111-1111-4111-8111-111111111111",
+        registerInngest: vi.fn((_app, execute: InngestRunExecutor) => {
+          inngestExecute = execute;
+        }),
+      },
+    );
+
+    const result = await inngestExecute({ workflow: { schemaVersion: "1.3" } });
+
+    expect(result).toEqual({ accepted: true, outcome: completedOutcome });
+    expect(observedInput.onTerminalScreenshot).toBeUndefined();
+    await service.shutdown();
   });
 
   it("shares local capacity between direct and Inngest runs", async () => {

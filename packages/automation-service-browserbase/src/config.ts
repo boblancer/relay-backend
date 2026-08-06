@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
   BrowserbaseRegion,
   BrowserbaseWorkerConfig,
@@ -15,11 +17,13 @@ export class ConfigurationError extends Error {
 }
 
 export interface AutomationServiceConfig {
+  artifactDirectory: string;
   host: string;
   inngestDev: boolean;
   port: number;
   maxConcurrentRuns: number;
   retryAfterSeconds: number;
+  screenshotsEnabled: boolean;
   shutdownGraceMs: number;
   worker: BrowserbaseWorkerConfig;
 }
@@ -31,6 +35,9 @@ const regions = new Set<BrowserbaseRegion>([
   "ap-southeast-1",
 ]);
 const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
+const defaultArtifactDirectory = resolve(
+  fileURLToPath(new URL("../../../.relay/artifacts/", import.meta.url)),
+);
 
 function requiredSecret(
   value: string | undefined,
@@ -69,6 +76,20 @@ function strictOptIn(value: string | undefined): boolean {
   throw new ConfigurationError("invalid_server_configuration");
 }
 
+function screenshotsEnabled(value: string | undefined): boolean {
+  if (value === undefined || value === "true") return true;
+  if (value === "false") return false;
+  throw new ConfigurationError("invalid_server_configuration");
+}
+
+function artifactDirectory(value: string | undefined): string {
+  if (value === undefined) return defaultArtifactDirectory;
+  if (!value.trim() || value !== value.trim()) {
+    throw new ConfigurationError("invalid_server_configuration");
+  }
+  return resolve(value);
+}
+
 export function loadServiceConfig(environment: NodeJS.ProcessEnv): AutomationServiceConfig {
   const apiKey = requiredSecret(
     environment.BROWSERBASE_API_KEY,
@@ -80,11 +101,13 @@ export function loadServiceConfig(environment: NodeJS.ProcessEnv): AutomationSer
   }
   const inngestDev = strictOptIn(environment.INNGEST_DEV);
   const host = environment.AUTOMATION_HOST?.trim() || "127.0.0.1";
-  if (inngestDev && !loopbackHosts.has(host)) {
+  const screenshots = screenshotsEnabled(environment.AUTOMATION_SCREENSHOTS);
+  if ((inngestDev || screenshots) && !loopbackHosts.has(host)) {
     throw new ConfigurationError("invalid_server_configuration");
   }
 
   return {
+    artifactDirectory: artifactDirectory(environment.AUTOMATION_ARTIFACT_DIR),
     host,
     inngestDev,
     port: boundedInteger(environment.PORT, 8080, 1, 65_535),
@@ -100,6 +123,7 @@ export function loadServiceConfig(environment: NodeJS.ProcessEnv): AutomationSer
       1,
       3_600,
     ),
+    screenshotsEnabled: screenshots,
     shutdownGraceMs: boundedInteger(
       environment.AUTOMATION_SHUTDOWN_GRACE_MS,
       30_000,

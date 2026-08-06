@@ -8,11 +8,13 @@ const requiredEnvironment = {
 describe("loadServiceConfig", () => {
   it("uses conservative service and worker defaults", () => {
     expect(loadServiceConfig(requiredEnvironment)).toEqual({
+      artifactDirectory: expect.stringMatching(/\/\.relay\/artifacts$/),
       host: "127.0.0.1",
       port: 8080,
       maxConcurrentRuns: 5,
       inngestDev: false,
       retryAfterSeconds: 1,
+      screenshotsEnabled: true,
       shutdownGraceMs: 30_000,
       worker: {
         apiKey: "browserbase-key",
@@ -38,15 +40,27 @@ describe("loadServiceConfig", () => {
     });
   });
 
+  it("allows a non-loopback host only when screenshots and Inngest are disabled", () => {
+    expect(
+      loadServiceConfig({
+        ...requiredEnvironment,
+        AUTOMATION_HOST: "0.0.0.0",
+        AUTOMATION_SCREENSHOTS: "false",
+      }),
+    ).toMatchObject({ host: "0.0.0.0", inngestDev: false, screenshotsEnabled: false });
+  });
+
   it("parses explicit operator-controlled settings", () => {
     expect(
       loadServiceConfig({
         ...requiredEnvironment,
         AUTOMATION_HOST: "127.0.0.1",
         AUTOMATION_MAX_CONCURRENT_RUNS: "3",
+        AUTOMATION_ARTIFACT_DIR: "/tmp/relay-artifacts",
         AUTOMATION_RETRY_AFTER_SECONDS: "5",
         AUTOMATION_RUN_TIMEOUT_MS: "300000",
         AUTOMATION_SHUTDOWN_GRACE_MS: "15000",
+        AUTOMATION_SCREENSHOTS: "false",
         AUTOMATION_STEP_TIMEOUT_MS: "30000",
         BROWSERBASE_PROJECT_ID: "project-id",
         BROWSERBASE_REGION: "eu-central-1",
@@ -57,10 +71,12 @@ describe("loadServiceConfig", () => {
       }),
     ).toMatchObject({
       host: "127.0.0.1",
+      artifactDirectory: "/tmp/relay-artifacts",
       inngestDev: true,
       maxConcurrentRuns: 3,
       port: 9000,
       retryAfterSeconds: 5,
+      screenshotsEnabled: false,
       shutdownGraceMs: 15_000,
       worker: {
         projectId: "project-id",
@@ -80,6 +96,8 @@ describe("loadServiceConfig", () => {
     [{ ...requiredEnvironment, AUTOMATION_MAX_CONCURRENT_RUNS: "1.5" }, "invalid_server_configuration"],
     [{ ...requiredEnvironment, AUTOMATION_RUN_TIMEOUT_MS: "600001" }, "invalid_server_configuration"],
     [{ ...requiredEnvironment, AUTOMATION_STEP_TIMEOUT_MS: "60001" }, "invalid_server_configuration"],
+    [{ ...requiredEnvironment, AUTOMATION_SCREENSHOTS: "yes" }, "invalid_server_configuration"],
+    [{ ...requiredEnvironment, AUTOMATION_HOST: "0.0.0.0" }, "invalid_server_configuration"],
     [{ ...requiredEnvironment, INNGEST_DEV: "true" }, "invalid_server_configuration"],
     [
       { ...requiredEnvironment, AUTOMATION_HOST: "0.0.0.0", INNGEST_DEV: "1" },

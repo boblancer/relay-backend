@@ -375,9 +375,14 @@ def test_automation_contract_loader_reads_the_run_service_contract() -> None:
         "/v1/run",
         "/v1/batches",
         "/v1/batches/{batchId}",
+        "/v1/artifacts/{artifactId}",
         "/health/live",
         "/health/ready",
     }
+    assert (
+        contract["components"]["schemas"]["TerminalThumbnail"]["properties"]["mediaType"]["const"]
+        == "image/webp"
+    )
     assert "/api/inngest" not in contract["paths"]
 
 

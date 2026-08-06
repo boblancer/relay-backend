@@ -5,6 +5,7 @@ import {
   type BrowserbaseRunOutcome,
   type BrowserbaseWorkerConfig,
   type BrowserbaseWorkerEvent,
+  type TerminalScreenshot,
 } from "@relay/automation-worker-browserbase";
 import Fastify, {
   type FastifyInstance,
@@ -14,7 +15,9 @@ import Fastify, {
 import {
   BatchCoordinator,
   type BatchRunInput,
+  type ManagedRunOutcome,
 } from "./batches/batch-coordinator.js";
+import { ArtifactStore } from "./artifacts.js";
 import type { AutomationServiceConfig } from "./config.js";
 import {
   registerInngestFunctions,
@@ -54,6 +57,7 @@ interface RunWorker {
 }
 
 export interface AutomationServiceDependencies {
+  artifactStore?: Pick<ArtifactStore, "read" | "save">;
   createWorker(config: BrowserbaseWorkerConfig): RunWorker;
   log(record: SafeLogRecord): void;
   randomUUID(): string;
@@ -134,12 +138,20 @@ const batchPathSchema = {
   properties: { batchId: { type: "string", format: "uuid" } },
 } as const;
 
+const artifactPathSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["artifactId"],
+  properties: { artifactId: { type: "string", format: "uuid" } },
+} as const;
+
 function safeError(code: string, message: string) {
   return { error: { code, message } };
 }
 
 function acceptsMediaType(header: string | undefined, expected: string): boolean {
   if (!header) return true;
+  const expectedType = expected.split("/", 1)[0];
   return header.split(",").some((item) => {
     const [rawMediaType, ...parameters] = item.split(";");
     const mediaType = rawMediaType?.trim().toLowerCase();
@@ -148,7 +160,7 @@ function acceptsMediaType(header: string | undefined, expected: string): boolean
       .find((parameter) => parameter.startsWith("q="));
     const quality = qualityParameter ? Number(qualityParameter.slice(2)) : 1;
     const mediaTypeMatches =
-      mediaType === "*/*" || mediaType === "application/*" || mediaType === expected;
+      mediaType === "*/*" || mediaType === `${expectedType}/*` || mediaType === expected;
     return mediaTypeMatches && Number.isFinite(quality) && quality > 0 && quality <= 1;
   });
 }
@@ -226,7 +238,13 @@ export function buildAutomationService(
     logger: false,
   });
   const worker = dependencies.createWorker(config.worker);
-  const activeRuns = new Map<AbortController, Promise<BrowserbaseRunOutcome>>();
+  const artifactStore =
+    dependencies.artifactStore ??
+    new ArtifactStore({
+      directory: config.artifactDirectory,
+      randomUUID: dependencies.randomUUID,
+    });
+  const activeRuns = new Map<AbortController, Promise<ManagedRunOutcome>>();
   let shuttingDown = false;
   let notifyRunSettled = () => {};
   const safeLog = (record: SafeLogRecord) => {
@@ -245,10 +263,30 @@ export function buildAutomationService(
 
   const startManagedRun = (
     input: Omit<BrowserbaseRunInput, "signal">,
-    controller = new AbortController(),
+    options: { captureScreenshot?: boolean; controller?: AbortController } = {},
   ) => {
+    const controller = options.controller ?? new AbortController();
+    let thumbnail: ManagedRunOutcome["thumbnail"];
+    let acceptsThumbnail = true;
+    const onTerminalScreenshot =
+      config.screenshotsEnabled && options.captureScreenshot !== false
+        ? async (screenshot: TerminalScreenshot) => {
+            const saved = await artifactStore.save(screenshot);
+            if (acceptsThumbnail) thumbnail = saved;
+          }
+        : undefined;
     const runPromise = Promise.resolve()
-      .then(() => worker.run({ ...input, signal: controller.signal }))
+      .then(() =>
+        worker.run({
+          ...input,
+          signal: controller.signal,
+          ...(onTerminalScreenshot ? { onTerminalScreenshot } : {}),
+        }),
+      )
+      .then((outcome): ManagedRunOutcome => {
+        acceptsThumbnail = false;
+        return thumbnail ? { ...outcome, thumbnail } : outcome;
+      })
       .finally(() => {
         activeRuns.delete(controller);
         notifyRunSettled();
@@ -266,7 +304,10 @@ export function buildAutomationService(
   const executeInngestRun: InngestRunExecutor = async (input) => {
     const code = admissionCode();
     if (code) return { accepted: false, code };
-    return { accepted: true, outcome: await startManagedRun(input) };
+    return {
+      accepted: true,
+      outcome: await startManagedRun(input, { captureScreenshot: false }),
+    };
   };
 
   app.setErrorHandler((error, _request, reply) => {
@@ -395,8 +436,8 @@ export function buildAutomationService(
         ...(request.body.startStepId ? { startStepId: request.body.startStepId } : {}),
       };
 
-      const runPromise = startManagedRun(input, controller);
-      let outcome: BrowserbaseRunOutcome;
+      const runPromise = startManagedRun(input, { controller });
+      let outcome: ManagedRunOutcome;
       try {
         outcome = await runPromise;
       } catch {
@@ -477,6 +518,30 @@ export function buildAutomationService(
           .send(safeError("batch_not_found", "The batch is unknown or expired."));
       }
       return reply.header("Cache-Control", "no-store").send(snapshot);
+    },
+  );
+
+  app.get<{ Params: { artifactId: string } }>(
+    "/v1/artifacts/:artifactId",
+    { schema: { params: artifactPathSchema } },
+    async (request, reply) => {
+      if (!acceptsMediaType(request.headers.accept, "image/webp")) {
+        return reply
+          .status(406)
+          .send(safeError("not_acceptable", "Accept must allow image/webp."));
+      }
+      const artifact = await artifactStore.read(request.params.artifactId);
+      if (!artifact) {
+        return reply
+          .header("Cache-Control", "no-store")
+          .status(404)
+          .send(safeError("artifact_not_found", "The artifact is unknown or expired."));
+      }
+      return reply
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .type(artifact.mediaType)
+        .send(artifact.bytes);
     },
   );
 

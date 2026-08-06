@@ -9,4 +9,5 @@ export type {
   BrowserbaseWorkerEvent,
   BrowserbaseWorkerFailureCode,
   CleanupStatus,
+  TerminalScreenshot,
 } from "./worker.js";

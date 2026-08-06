@@ -32,10 +32,13 @@ setup step, or file location changes.
 - Never expose or log workflow bodies, credentials, step payloads, targets, parameter
   values, source session IDs, or persistence details.
 - Keep run-service request/header logging disabled; keep its default bind address on
-  loopback; stream exactly one safe terminal outcome and abort Browserbase work on
-  disconnect or shutdown. The unauthenticated POC must not be exposed publicly.
-- Keep batch polling projections privacy-safe, enforce shared process-wide run capacity,
-  and never start queued batch work after shutdown begins.
+  loopback; stream exactly one terminal outcome with safe scalar fields and abort
+  Browserbase work on disconnect or shutdown. The unauthenticated POC must not be
+  exposed publicly.
+- Keep batch polling progress fields privacy-safe. Treat optional terminal thumbnail
+  metadata as sensitive: expose only an opaque temporary loopback URL and fixed image
+  metadata, never bytes or local paths, and never log artifact IDs or URLs. Enforce
+  shared process-wide run capacity and never start queued batch work after shutdown.
 - List queries must read only safe summaries, not canonical workflow documents.
 - Keep runtime SQL parameterized.
 - Keep `openapi.yaml`, Pydantic models, controllers, and tests synchronized.

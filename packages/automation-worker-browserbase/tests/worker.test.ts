@@ -17,6 +17,8 @@ function workerFixture(options: {
   closeThrowsSynchronously?: boolean;
   releaseError?: Error;
   assertionText?: string;
+  screenshotError?: Error;
+  screenshotNeverResolves?: boolean;
 } = {}) {
   const locator = {
     count: vi.fn(async () => 1),
@@ -27,6 +29,11 @@ function workerFixture(options: {
     getByTestId: vi.fn(() => locator),
     url: vi.fn(() => "https://example.com/form"),
   } as unknown as Frame;
+  const screenshot = vi.fn(async () => {
+    if (options.screenshotNeverResolves) await new Promise(() => undefined);
+    if (options.screenshotError) throw options.screenshotError;
+    return Buffer.from("private screenshot pixels");
+  });
   const page = {
     frames: vi.fn(() => [frame]),
     goto: vi.fn(async () => {
@@ -39,6 +46,7 @@ function workerFixture(options: {
     mainFrame: vi.fn(() => frame),
     off: vi.fn(),
     on: vi.fn(),
+    screenshot,
   } as unknown as Page;
   const context = { pages: vi.fn(() => [page]) } as unknown as BrowserContext;
   const close = vi.fn(() => {
@@ -61,7 +69,7 @@ function workerFixture(options: {
     return browser;
   });
   const dependencies: BrowserbaseWorkerDependencies = { sessionClient, connect };
-  return { browser, close, connect, create, dependencies, page, release };
+  return { browser, close, connect, create, dependencies, page, release, screenshot };
 }
 
 afterEach(() => {
@@ -129,6 +137,56 @@ describe("BrowserbaseAutomationWorker", () => {
       "step.completed",
       "run.completed",
     ]);
+  });
+
+  it("captures the terminal viewport before closing the browser", async () => {
+    const fixture = workerFixture();
+    const screenshots: Buffer[] = [];
+    const worker = new BrowserbaseAutomationWorker({ apiKey: "api-key" }, fixture.dependencies);
+
+    const outcome = await worker.run({
+      workflow: completeWorkflow([navigateStep()]),
+      onTerminalScreenshot: async (screenshot) => {
+        expect(fixture.close).not.toHaveBeenCalled();
+        screenshots.push(screenshot.bytes);
+      },
+    });
+
+    expect(outcome).toMatchObject({ status: "completed", cleanupStatus: "completed" });
+    expect(fixture.screenshot).toHaveBeenCalledWith({ fullPage: false, type: "png" });
+    expect(screenshots).toEqual([Buffer.from("private screenshot pixels")]);
+  });
+
+  it("preserves the automation outcome when terminal screenshot capture fails", async () => {
+    const fixture = workerFixture({ screenshotError: new Error("private screenshot failure") });
+    const onTerminalScreenshot = vi.fn();
+    const worker = new BrowserbaseAutomationWorker({ apiKey: "api-key" }, fixture.dependencies);
+
+    const outcome = await worker.run({
+      workflow: completeWorkflow([navigateStep()]),
+      onTerminalScreenshot,
+    });
+
+    expect(outcome).toMatchObject({ status: "completed", cleanupStatus: "completed" });
+    expect(onTerminalScreenshot).not.toHaveBeenCalled();
+    expect(fixture.close).toHaveBeenCalledOnce();
+  });
+
+  it("bounds terminal screenshot capture before browser cleanup", async () => {
+    vi.useFakeTimers();
+    const fixture = workerFixture({ screenshotNeverResolves: true });
+    const worker = new BrowserbaseAutomationWorker({ apiKey: "api-key" }, fixture.dependencies);
+    const run = worker.run({
+      workflow: completeWorkflow([navigateStep()]),
+      onTerminalScreenshot: vi.fn(),
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(fixture.screenshot).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await expect(run).resolves.toMatchObject({ status: "completed", cleanupStatus: "completed" });
+    expect(fixture.close).toHaveBeenCalledOnce();
   });
 
   it("fails validation before creating a paid session", async () => {
@@ -224,11 +282,13 @@ describe("BrowserbaseAutomationWorker", () => {
   it("returns privacy-safe execution failures", async () => {
     const fixture = workerFixture({ gotoError: new Error("payload-secret raw provider error") });
     const events: BrowserbaseWorkerEvent[] = [];
+    const onTerminalScreenshot = vi.fn();
     const worker = new BrowserbaseAutomationWorker({ apiKey: "api-key" }, fixture.dependencies);
 
     const outcome = await worker.run({
       workflow: completeWorkflow([navigateStep()]),
       onEvent: (event) => events.push(event),
+      onTerminalScreenshot,
     });
 
     expect(outcome).toMatchObject({
@@ -241,6 +301,7 @@ describe("BrowserbaseAutomationWorker", () => {
     expect(JSON.stringify({ events, outcome })).not.toMatch(
       /payload-secret|private connection|private-session-id|private-connect-url|example\.com/,
     );
+    expect(onTerminalScreenshot).toHaveBeenCalledOnce();
   });
 
   it("classifies the run deadline separately from caller cancellation", async () => {
@@ -250,10 +311,15 @@ describe("BrowserbaseAutomationWorker", () => {
       { apiKey: "api-key", runTimeoutMs: 10 },
       timedFixture.dependencies,
     );
-    const timedRun = timedWorker.run({ workflow: completeWorkflow([navigateStep()]) });
+    const timedScreenshot = vi.fn();
+    const timedRun = timedWorker.run({
+      workflow: completeWorkflow([navigateStep()]),
+      onTerminalScreenshot: timedScreenshot,
+    });
     await vi.advanceTimersByTimeAsync(110);
 
     await expect(timedRun).resolves.toMatchObject({ status: "timed_out", stage: "execution" });
+    expect(timedScreenshot).toHaveBeenCalledOnce();
 
     const cancelledFixture = workerFixture({ gotoDelayMs: 100 });
     const cancelledWorker = new BrowserbaseAutomationWorker(
@@ -261,9 +327,11 @@ describe("BrowserbaseAutomationWorker", () => {
       cancelledFixture.dependencies,
     );
     const controller = new AbortController();
+    const cancelledScreenshot = vi.fn();
     const cancelledRun = cancelledWorker.run({
       workflow: completeWorkflow([navigateStep()]),
       signal: controller.signal,
+      onTerminalScreenshot: cancelledScreenshot,
     });
     await vi.advanceTimersByTimeAsync(0);
     expect(cancelledFixture.page.goto).toHaveBeenCalledOnce();
@@ -271,6 +339,7 @@ describe("BrowserbaseAutomationWorker", () => {
     await vi.advanceTimersByTimeAsync(110);
 
     await expect(cancelledRun).resolves.toMatchObject({ status: "cancelled", stage: "execution" });
+    expect(cancelledScreenshot).toHaveBeenCalledOnce();
   });
 
   it("reports cleanup failure without replacing a successful result", async () => {

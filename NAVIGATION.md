@@ -126,7 +126,7 @@ POST /v1/run or /v1/batches (unauthenticated local HTTP)
                              |
                              v
 @relay/automation-service-browserbase
- validation | transport | shared capacity | cancellation
+ validation | transport | shared capacity | cancellation | thumbnail storage
                              |
                              v
 @relay/automation-worker-browserbase
@@ -150,6 +150,12 @@ Neither execution mode shares the Python service's transaction, repository,
 authentication, or persistence infrastructure. Earlier workflow schema versions are
 rejected before provisioning. Assertions resolve one visible target and evaluate once
 in workflow order without retries or post-assertion settling.
+
+For direct and batch work, the Browserbase worker can capture the visible viewport after
+automation-core returns and before provider cleanup. The service converts that image to
+a bounded WebP under `.relay/artifacts` and exposes an opaque URL from an in-memory
+one-hour allowlist. Files persist for manual local inspection, while URL access and all
+batch/run metadata disappear on restart. The Inngest path does not request capture.
 
 ### Application assembly and cross-cutting behavior
 

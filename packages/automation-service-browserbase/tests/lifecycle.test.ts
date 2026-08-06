@@ -10,11 +10,13 @@ import type { AutomationServiceConfig } from "../src/config.js";
 import type { InngestRunExecutor } from "../src/inngest.js";
 
 const config: AutomationServiceConfig = {
+  artifactDirectory: "/tmp/relay-test-artifacts",
   host: "127.0.0.1",
   inngestDev: false,
   port: 8080,
   maxConcurrentRuns: 1,
   retryAfterSeconds: 1,
+  screenshotsEnabled: false,
   shutdownGraceMs: 1_000,
   worker: { apiKey: "browserbase-key" },
 };

@@ -31,7 +31,8 @@
   "dependencies": {
     "@relay/automation-worker-browserbase": "file:../automation-worker-browserbase",
     "fastify": "^5.11.0",
-    "inngest": "^4.15.0"
+    "inngest": "^4.15.0",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

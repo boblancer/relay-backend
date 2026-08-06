@@ -4,6 +4,7 @@ import type {
   BrowserbaseWorkerEvent,
   BrowserbaseWorkerFailureCode,
 } from "@relay/automation-worker-browserbase";
+import type { ThumbnailReference } from "../artifacts.js";
 
 const defaultMaximumBatches = 100;
 const defaultTerminalTtlMs = 60 * 60 * 1_000;
@@ -24,7 +25,10 @@ export interface BatchRunSnapshot {
   failedStepIndex?: number;
   phase?: BatchFailurePhase;
   code?: BatchFailureCode;
+  thumbnail?: ThumbnailReference;
 }
+
+export type ManagedRunOutcome = BrowserbaseRunOutcome & { thumbnail?: ThumbnailReference };
 
 export interface BatchSnapshot {
   batchId: string;
@@ -58,7 +62,7 @@ interface BatchCoordinatorOptions {
   terminalTtlMs?: number;
   tryStart(
     input: Omit<BrowserbaseRunInput, "signal">,
-  ): Promise<BrowserbaseRunOutcome> | undefined;
+  ): Promise<ManagedRunOutcome> | undefined;
 }
 
 function terminal(status: BatchRunStatus): boolean {
@@ -78,6 +82,7 @@ function snapshotRun(run: InternalBatchRun): BatchRunSnapshot {
     ...(run.failedStepIndex === undefined ? {} : { failedStepIndex: run.failedStepIndex }),
     ...(run.phase === undefined ? {} : { phase: run.phase }),
     ...(run.code === undefined ? {} : { code: run.code }),
+    ...(run.thumbnail === undefined ? {} : { thumbnail: run.thumbnail }),
   };
 }
 
@@ -177,8 +182,9 @@ export class BatchCoordinator {
     }
   }
 
-  private applyOutcome(run: InternalBatchRun, outcome: BrowserbaseRunOutcome): void {
+  private applyOutcome(run: InternalBatchRun, outcome: ManagedRunOutcome): void {
     run.status = outcome.status === "completed" ? "completed" : "failed";
+    run.thumbnail = outcome.thumbnail;
     if (outcome.status === "failed") run.code = outcome.code;
     if (outcome.status === "cancelled" || outcome.status === "timed_out") {
       run.code = outcome.status;

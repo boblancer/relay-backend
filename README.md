@@ -97,6 +97,8 @@ docker compose down --volumes
 | `AUTOMATION_RUN_TIMEOUT_MS` | Run deadline, at most 10 minutes; defaults to `600000` |
 | `AUTOMATION_STEP_TIMEOUT_MS` | Step deadline, at most 60 seconds; defaults to `60000` |
 | `AUTOMATION_SHUTDOWN_GRACE_MS` | Cancellation cleanup grace; defaults to `30000` |
+| `AUTOMATION_SCREENSHOTS` | Terminal screenshot capture; defaults to `true` and requires loopback |
+| `AUTOMATION_ARTIFACT_DIR` | Persistent screenshot directory; defaults to repository `.relay/artifacts` |
 | `INNGEST_DEV` | Set exactly `1` with a loopback `AUTOMATION_HOST` to enable the local-only Inngest POC endpoint |
 
 No credentials are built into the application. Copy `.env.example` to the ignored
@@ -140,7 +142,10 @@ is a separate Fastify process exposing unauthenticated local direct and batch ex
 queues one to ten workflows in process memory, while `GET /v1/batches/{batchId}` polls
 safe progress for up to one hour. Batch, direct, and opt-in local Inngest work share the
 same five-slot default capacity. The process does not call the persistence API or use
-PostgreSQL, and all batch state disappears on restart.
+PostgreSQL, and all batch state disappears on restart. Direct and batch terminal
+outcomes may include a one-hour loopback thumbnail URL backed by a compressed file in
+`.relay/artifacts`; files persist for manual cleanup, but URL access does not survive a
+restart. The Inngest path does not capture screenshots.
 
 Successful idempotency records are retained indefinitely. A replay with the same key,
 method, path, and validated canonical JSON returns the original response even if the
@@ -160,6 +165,8 @@ contract's schema 1.3-only assertion semantics. See
 queueing and polling. See
 [ADR 0008](docs/decisions/0008-unauthenticated-local-execution-service.md) for the
 execution service's unauthenticated loopback-only POC boundary.
+See [ADR 0009](docs/decisions/0009-local-terminal-screenshot-artifacts.md) for terminal
+screenshot capture, persistent local files, and temporary URL access.
 
 ## POC boundaries
 
@@ -173,5 +180,7 @@ shared per-process capacity, and a bounded in-memory batch queue. It still exclu
 schedules, durable run persistence, idempotency, reconnection, legacy workflow migration,
 user authorization, and authenticated contexts. Workflow documents may contain sensitive
 values, so request bodies and workflow contents must not be logged.
+Terminal screenshot files are a deliberate local exception to the no-persistence run
+model; they have no durable API index and are never deleted automatically.
 The execution service has no authentication and defaults to loopback; it is not safe to
 expose publicly.

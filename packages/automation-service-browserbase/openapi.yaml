@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Relay Browserbase Automation Service
-  version: 1.2.0
+  version: 1.3.0
   summary: Immediate and in-memory background execution of finalized Relay workflows.
   description: |
     Unauthenticated local-development API for running complete schema 1.3 workflows in
@@ -16,9 +16,15 @@ x-contract-semantics:
   batchMaximumRuns: 10
   batchMaximumRetained: 100
   batchTerminalTtlSeconds: 3600
+  artifactAccessTtlSeconds: 3600
+  artifactMediaType: image/webp
+  artifactMaximumBytes: 102400
+  artifactDurableOnDisk: true
+  artifactApiDurable: false
   durable: false
   privacyRules:
-    - Never emit workflow documents, URLs, payloads, parameter values, credentials, provider session identifiers, connection URLs, or raw exceptions.
+    - Never emit workflow documents, browser or target URLs, payloads, parameter values, credentials, provider session identifiers, connection URLs, raw exceptions, image bytes, or local artifact paths.
+    - Thumbnail URLs are sensitive, temporary loopback capabilities and must never enter logs.
     - Do not enable request-body or request-header logging.
 paths:
   /v1/run:
@@ -27,9 +33,10 @@ paths:
       summary: Run one finalized workflow
       description: |
         Validates the request before creating a paid Browserbase session. A valid run
-        returns a stream of privacy-safe JSON Lines. The final line always has type
-        `worker.outcome`. Disconnecting cancels the run; the result cannot be resumed
-        or retrieved later.
+        returns a stream of safe-field JSON Lines. The final line always has type
+        `worker.outcome` and may contain sensitive terminal thumbnail metadata.
+        Disconnecting cancels the run; the run result cannot be resumed or retrieved
+        later.
       requestBody:
         required: true
         content:
@@ -73,7 +80,8 @@ paths:
       description: |
         Accepts one to ten complete workflow documents and queues each workflow once in
         FIFO order. The batch and its polling result are lost when the process exits.
-        Callers must not automatically retry an uncertain submission.
+        Terminal run snapshots may contain sensitive thumbnail metadata. Callers must
+        not automatically retry an uncertain submission.
       requestBody:
         required: true
         content:
@@ -119,7 +127,7 @@ paths:
             format: uuid
       responses:
         "200":
-          description: Privacy-safe progress for the retained batch.
+          description: Safe progress and optional sensitive thumbnail metadata for the retained batch.
           headers:
             Cache-Control:
               schema:
@@ -133,6 +141,46 @@ paths:
           $ref: "#/components/responses/InvalidRequest"
         "404":
           $ref: "#/components/responses/BatchNotFound"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "500":
+          $ref: "#/components/responses/Internal"
+  /v1/artifacts/{artifactId}:
+    get:
+      operationId: getRunArtifact
+      summary: Read a temporary terminal screenshot
+      description: |
+        Returns a sensitive terminal viewport thumbnail while its process-local access
+        record remains available. The WebP file remains on local disk after URL expiry
+        or process restart, but it cannot be retrieved through this API afterward.
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Compressed terminal viewport thumbnail.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+            X-Content-Type-Options:
+              schema:
+                type: string
+                const: nosniff
+          content:
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/ArtifactNotFound"
         "406":
           $ref: "#/components/responses/NotAcceptable"
         "500":
@@ -266,6 +314,30 @@ components:
           enum: [acting, asserting, settling, waiting]
         code:
           type: string
+        thumbnail:
+          $ref: "#/components/schemas/TerminalThumbnail"
+    TerminalThumbnail:
+      type: object
+      additionalProperties: false
+      required: [url, mediaType, width, height, expiresAt]
+      properties:
+        url:
+          type: string
+          pattern: ^/v1/artifacts/[0-9a-fA-F-]{36}$
+        mediaType:
+          type: string
+          const: image/webp
+        width:
+          type: integer
+          minimum: 1
+          maximum: 480
+        height:
+          type: integer
+          minimum: 1
+          maximum: 300
+        expiresAt:
+          type: string
+          format: date-time
     RunStreamLine:
       type: object
       required: [runId, type]
@@ -275,6 +347,8 @@ components:
           format: uuid
         type:
           type: string
+        thumbnail:
+          $ref: "#/components/schemas/TerminalThumbnail"
       additionalProperties: true
     Error:
       type: object
@@ -347,6 +421,12 @@ components:
             $ref: "#/components/schemas/Error"
     BatchNotFound:
       description: The batch is unknown, expired, or was lost with an earlier process.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ArtifactNotFound:
+      description: The artifact is unknown, expired, or inaccessible after process restart.
       content:
         application/json:
           schema:

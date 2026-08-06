@@ -4,7 +4,7 @@ import {
   type AutomationEvent,
   type AutomationResult,
 } from "@relay/automation-core";
-import { chromium, type Browser } from "playwright-core";
+import { chromium, type Browser, type Page } from "playwright-core";
 import { prepareWorkflow, WorkerValidationError, type WorkerValidationCode } from "./prepare.js";
 
 export type BrowserbaseRegion =
@@ -29,6 +29,12 @@ export interface BrowserbaseRunInput {
   parameterValues?: Readonly<Record<string, string>>;
   signal?: AbortSignal;
   onEvent?: (event: BrowserbaseWorkerEvent) => void;
+  onTerminalScreenshot?: (screenshot: TerminalScreenshot) => Promise<void> | void;
+}
+
+export interface TerminalScreenshot {
+  bytes: Buffer;
+  mediaType: "image/png";
 }
 
 export interface BrowserbaseSessionOptions {
@@ -104,6 +110,24 @@ type PendingOutcome = BrowserbaseRunOutcome extends infer Outcome
 
 const defaultRunTimeoutMs = 600_000;
 const defaultStepTimeoutMs = 60_000;
+const terminalScreenshotTimeoutMs = 2_000;
+
+async function captureTerminalScreenshot(page: Page, input: BrowserbaseRunInput): Promise<void> {
+  if (!input.onTerminalScreenshot) return;
+  let timeout: NodeJS.Timeout | undefined;
+  const capture = Promise.resolve()
+    .then(async () => {
+      const bytes = await page.screenshot({ fullPage: false, type: "png" });
+      await input.onTerminalScreenshot?.({ bytes, mediaType: "image/png" });
+    })
+    .catch(() => undefined);
+  const deadline = new Promise<void>((resolve) => {
+    timeout = setTimeout(resolve, terminalScreenshotTimeoutMs);
+    timeout.unref();
+  });
+  await Promise.race([capture, deadline]);
+  if (timeout) clearTimeout(timeout);
+}
 
 class SdkSessionClient implements BrowserbaseSessionClient {
   private readonly client: Browserbase;
@@ -193,6 +217,7 @@ export class BrowserbaseAutomationWorker {
     timeout.unref();
 
     let browser: Browser | undefined;
+    let page: Page | undefined;
     let sessionId: string | undefined;
     let stage: "provisioning" | "execution" = "provisioning";
     let outcome: PendingOutcome;
@@ -224,7 +249,7 @@ export class BrowserbaseAutomationWorker {
       if (controller.signal.aborted) throw new Error("interrupted");
       browser = await dependencies.connect(session.connectUrl, this.stepTimeoutMs);
       if (controller.signal.aborted) throw new Error("interrupted");
-      const page = browser.contexts()[0]?.pages()[0];
+      page = browser.contexts()[0]?.pages()[0];
       if (!page) {
         outcome = { status: "failed", stage, code: "browser_unavailable" };
       } else {
@@ -255,6 +280,8 @@ export class BrowserbaseAutomationWorker {
       clearTimeout(timeout);
       input.signal?.removeEventListener("abort", onCallerAbort);
     }
+
+    if (page) await captureTerminalScreenshot(page, input);
 
     const cleanupTasks: Array<Promise<void>> = [];
     if (browser) cleanupTasks.push(Promise.resolve().then(() => browser.close()));
