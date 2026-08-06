@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
-from uuid import UUID, uuid4
 
 import psycopg
 from psycopg import Connection
@@ -29,64 +27,45 @@ class NamespaceService:
         storage: BlobStorage,
         *,
         repository: NamespaceRepository | None = None,
-        uuid_factory: Callable[[], UUID] | None = None,
-        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.database = database
         self.storage = storage
         self.repository = repository or NamespaceRepository()
-        self.uuid_factory = uuid_factory or uuid4
-        self.clock = clock or (lambda: datetime.now(UTC))
 
     def list_namespaces(self) -> list[Namespace]:
         with self._transaction() as connection:
             return self.repository.list_namespaces(connection)
 
     def create_namespace(self, name: str) -> Namespace:
-        now = self.clock()
-        namespace = Namespace(
-            id=self.uuid_factory(),
-            name=name,
-            created_at=now,
-            updated_at=now,
-        )
         try:
             with self._transaction() as connection:
-                self.repository.create_namespace(connection, namespace)
+                namespace_id = self.repository.create_namespace(connection, name)
+                return self.repository.get_namespace(connection, namespace_id)
         except psycopg.errors.UniqueViolation as error:
             raise DuplicateNameError from error
-        return namespace
 
-    def get_namespace(self, namespace_id: UUID) -> Namespace:
+    def get_namespace(self, namespace_id: int) -> Namespace:
         with self._transaction() as connection:
             return self.repository.get_namespace(connection, namespace_id)
 
-    def list_records(self, namespace_id: UUID) -> list[Record]:
+    def list_records(self, namespace_id: int) -> list[Record]:
         with self._transaction() as connection:
             return self.repository.list_records(connection, namespace_id)
 
-    def create_record(self, namespace_id: UUID, name: str) -> Record:
-        now = self.clock()
-        record = Record(
-            id=self.uuid_factory(),
-            namespace_id=namespace_id,
-            name=name,
-            created_at=now,
-            updated_at=now,
-        )
+    def create_record(self, namespace_id: int, name: str) -> Record:
         try:
             with self._transaction() as connection:
-                self.repository.create_record(connection, record)
+                record_id = self.repository.create_record(connection, namespace_id, name)
+                return self.repository.get_record(connection, record_id)
         except psycopg.errors.UniqueViolation as error:
             raise DuplicateNameError from error
-        return record
 
-    def get_record(self, record_id: UUID) -> Record:
+    def get_record(self, record_id: int) -> Record:
         with self._transaction() as connection:
             return self.repository.get_record(connection, record_id)
 
     def upload_file(
-        self, namespace_id: UUID, record_id: UUID, filename: str, data: bytes
+        self, namespace_id: int, record_id: int, filename: str, data: bytes
     ) -> Record:
         file_url = self.storage.save(namespace_id, record_id, filename, data)
         with self._transaction() as connection:
@@ -94,7 +73,7 @@ class NamespaceService:
             return self.repository.get_record(connection, record_id)
 
     def download_file(
-        self, namespace_id: UUID, record_id: UUID, filename: str
+        self, namespace_id: int, record_id: int, filename: str
     ) -> bytes:
         try:
             return self.storage.read(namespace_id, record_id, filename)
@@ -110,5 +89,7 @@ class NamespaceService:
             raise
         except (psycopg.OperationalError, PoolTimeout) as error:
             raise PersistenceUnavailableError from error
+        except psycopg.errors.UniqueViolation:
+            raise
         except psycopg.Error as error:
             raise InternalPersistenceError from error

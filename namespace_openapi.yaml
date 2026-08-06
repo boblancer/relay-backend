@@ -1,0 +1,397 @@
+openapi: 3.1.0
+info:
+  title: Namespace Blob Storage API
+  version: 1.0.0
+  summary: Namespace-scoped blob storage for robot recordings.
+  description: |
+    Provides namespace-scoped storage for binary records (robot video,
+    proprioception logs, etc.). Each namespace contains named records, and
+    each record can hold one uploaded file.
+
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+
+tags:
+  - name: Namespaces
+    description: Namespace and record management with blob storage.
+
+security:
+  - basicAuth: []
+
+paths:
+  /v1/namespaces:
+    get:
+      operationId: listNamespaces
+      tags:
+        - Namespaces
+      summary: List all namespaces
+      description: Returns all namespaces ordered by creation time descending.
+      responses:
+        "200":
+          description: List of namespaces.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Namespace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+    post:
+      operationId: createNamespace
+      tags:
+        - Namespaces
+      summary: Create a namespace
+      description: Creates a new namespace with a unique name.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNamespaceRequest"
+      responses:
+        "201":
+          description: Namespace created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Namespace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/DuplicateName"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/namespaces/{namespaceId}:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+
+    get:
+      operationId: getNamespace
+      tags:
+        - Namespaces
+      summary: Get a namespace
+      description: Returns a single namespace by ID.
+      responses:
+        "200":
+          description: The namespace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Namespace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/namespaces/{namespaceId}/records:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+
+    get:
+      operationId: listRecords
+      tags:
+        - Namespaces
+      summary: List records in a namespace
+      description: Returns all records in the namespace ordered by creation time descending.
+      responses:
+        "200":
+          description: List of records.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Record"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+    post:
+      operationId: createRecord
+      tags:
+        - Namespaces
+      summary: Create a record
+      description: Creates a new record in the namespace.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRecordRequest"
+      responses:
+        "201":
+          description: Record created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Record"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/DuplicateName"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/namespaces/{namespaceId}/records/{recordId}:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+      - $ref: "#/components/parameters/RecordId"
+
+    get:
+      operationId: getRecord
+      tags:
+        - Namespaces
+      summary: Get a record
+      description: Returns a single record by ID.
+      responses:
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Record"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/namespaces/{namespaceId}/records/{recordId}/upload:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+      - $ref: "#/components/parameters/RecordId"
+
+    post:
+      operationId: uploadFile
+      tags:
+        - Namespaces
+      summary: Upload a file to a record
+      description: Uploads a file and associates it with the record.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Record updated with file URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Record"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/namespaces/{namespaceId}/records/{recordId}/download:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+      - $ref: "#/components/parameters/RecordId"
+
+    get:
+      operationId: downloadFile
+      tags:
+        - Namespaces
+      summary: Download a record's file
+      description: Downloads the file associated with the record.
+      responses:
+        "200":
+          description: The file content.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: Shared credentials configured by the backend operator.
+
+  parameters:
+    NamespaceId:
+      name: namespaceId
+      in: path
+      required: true
+      description: Namespace serial ID.
+      schema:
+        type: integer
+
+    RecordId:
+      name: recordId
+      in: path
+      required: true
+      description: Record serial ID.
+      schema:
+        type: integer
+
+  responses:
+    Unauthorized:
+      description: Shared HTTP Basic credentials are missing or invalid.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: HTTP Basic authentication challenge.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            unauthorized:
+              value:
+                error:
+                  code: unauthorized
+                  message: Authentication is required.
+
+    NotFound:
+      description: The requested resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            missing:
+              value:
+                error:
+                  code: not_found
+                  message: The requested resource was not found.
+
+    DuplicateName:
+      description: A resource with that name already exists.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            duplicate:
+              value:
+                error:
+                  code: duplicate_name
+                  message: A resource with that name already exists.
+
+    Internal:
+      description: An unexpected failure occurred.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            internal:
+              value:
+                error:
+                  code: internal
+                  message: The operation failed.
+
+  schemas:
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+              minLength: 1
+
+    Namespace:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+          minLength: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Record:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - namespaceId
+        - name
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: integer
+        namespaceId:
+          type: integer
+        name:
+          type: string
+          minLength: 1
+        fileUrl:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateNamespaceRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+
+    CreateRecordRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1

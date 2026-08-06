@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from uuid import UUID
-
 from fastapi import APIRouter, Depends, Request, UploadFile
 from fastapi.responses import Response
 
@@ -44,12 +42,12 @@ def create_namespace(request: Request, body: CreateNamespaceRequest) -> Namespac
     response_model=Namespace,
     response_model_exclude_none=True,
 )
-def get_namespace(request: Request, namespace_id: UUID) -> Namespace:
+def get_namespace(request: Request, namespace_id: int) -> Namespace:
     return _service(request).get_namespace(namespace_id)
 
 
 @router.get("/{namespace_id}/records", response_model=list[Record])
-def list_records(request: Request, namespace_id: UUID) -> list[Record]:
+def list_records(request: Request, namespace_id: int) -> list[Record]:
     return _service(request).list_records(namespace_id)
 
 
@@ -60,7 +58,7 @@ def list_records(request: Request, namespace_id: UUID) -> list[Record]:
     status_code=201,
 )
 def create_record(
-    request: Request, namespace_id: UUID, body: CreateRecordRequest
+    request: Request, namespace_id: int, body: CreateRecordRequest
 ) -> Record:
     return _service(request).create_record(namespace_id, body.name)
 
@@ -70,14 +68,14 @@ def create_record(
     response_model=Record,
     response_model_exclude_none=True,
 )
-def get_record(request: Request, namespace_id: UUID, record_id: UUID) -> Record:
+def get_record(request: Request, namespace_id: int, record_id: int) -> Record:
     del namespace_id
     return _service(request).get_record(record_id)
 
 
 @router.post("/{namespace_id}/records/{record_id}/upload", response_model=Record)
 async def upload_file(
-    request: Request, namespace_id: UUID, record_id: UUID, file: UploadFile
+    request: Request, namespace_id: int, record_id: int, file: UploadFile
 ) -> Record:
     data = await file.read()
     return _service(request).upload_file(namespace_id, record_id, file.filename or "upload", data)
@@ -85,7 +83,7 @@ async def upload_file(
 
 @router.get("/{namespace_id}/records/{record_id}/download")
 def download_file(
-    request: Request, namespace_id: UUID, record_id: UUID
+    request: Request, namespace_id: int, record_id: int
 ) -> Response:
     record = _service(request).get_record(record_id)
     if record.file_url is None:

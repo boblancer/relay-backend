@@ -11,3 +11,4 @@ class Settings(BaseSettings):
     basic_auth_username: str = Field(min_length=1)
     basic_auth_password: SecretStr = Field(min_length=1)
     blob_storage_root: str = "/data/blobs"
+    blob_storage_backend: str = "local"

@@ -11,7 +11,11 @@ from fastapi.responses import JSONResponse
 from scalar_fastapi import AgentScalarConfig, OpenAPISource, get_scalar_api_reference
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from relay_backend.contract import load_automation_openapi_contract, load_openapi_contract
+from relay_backend.contract import (
+    load_automation_openapi_contract,
+    load_namespace_openapi_contract,
+    load_openapi_contract,
+)
 from relay_backend.controllers.namespaces import router as namespace_router
 from relay_backend.controllers.workflows import router as workflow_router
 from relay_backend.data.database import Database
@@ -32,9 +36,18 @@ from relay_backend.request_limits import RequestBodyLimitMiddleware
 from relay_backend.services.namespaces import NamespaceService
 from relay_backend.services.workflows import WorkflowService
 from relay_backend.settings import Settings
-from relay_backend.storage import LocalBlobStorage
+from relay_backend.storage import BlobStorage, LocalBlobStorage
 
 logger = logging.getLogger(__name__)
+
+
+def _create_storage(settings: Settings) -> BlobStorage:
+    backend = settings.blob_storage_backend
+    if backend == "local":
+        root = Path(settings.blob_storage_root)
+        root.mkdir(parents=True, exist_ok=True)
+        return LocalBlobStorage(root)
+    raise ValueError(f"Unknown blob storage backend: {backend!r}")
 
 
 def create_app(
@@ -58,9 +71,7 @@ def create_app(
         database.open()
         app.state.workflow_service = WorkflowService(database)
 
-        storage_root = Path(runtime_settings.blob_storage_root)
-        storage_root.mkdir(parents=True, exist_ok=True)
-        storage = LocalBlobStorage(storage_root)
+        storage = _create_storage(runtime_settings)
         app.state.namespace_service = NamespaceService(database, storage)
 
         try:
@@ -76,6 +87,7 @@ def create_app(
     )
     contract = load_openapi_contract()
     automation_contract = load_automation_openapi_contract()
+    namespace_contract = load_namespace_openapi_contract()
     app.openapi = lambda: contract
 
     @app.get("/docs", include_in_schema=False)
@@ -93,6 +105,11 @@ def create_app(
                     title="Workflow Runs",
                     slug="workflow-runs",
                     content=automation_contract,
+                ),
+                OpenAPISource(
+                    title="Namespace Storage",
+                    slug="namespace-storage",
+                    content=namespace_contract,
                 ),
             ],
             scalar_js_url="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.64.0",

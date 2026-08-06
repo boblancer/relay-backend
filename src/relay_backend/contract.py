@@ -22,6 +22,13 @@ AUTOMATION_CONTRACT_PATH = (
     if REPOSITORY_AUTOMATION_CONTRACT_PATH.exists()
     else PACKAGED_AUTOMATION_CONTRACT_PATH
 )
+REPOSITORY_NAMESPACE_CONTRACT_PATH = Path(__file__).resolve().parents[2] / "namespace_openapi.yaml"
+PACKAGED_NAMESPACE_CONTRACT_PATH = Path(__file__).with_name("namespace_openapi.yaml")
+NAMESPACE_CONTRACT_PATH = (
+    REPOSITORY_NAMESPACE_CONTRACT_PATH
+    if REPOSITORY_NAMESPACE_CONTRACT_PATH.exists()
+    else PACKAGED_NAMESPACE_CONTRACT_PATH
+)
 
 
 def _load_contract(path: Path) -> dict[str, Any]:
@@ -38,3 +45,7 @@ def load_openapi_contract() -> dict[str, Any]:
 
 def load_automation_openapi_contract() -> dict[str, Any]:
     return _load_contract(AUTOMATION_CONTRACT_PATH)
+
+
+def load_namespace_openapi_contract() -> dict[str, Any]:
+    return _load_contract(NAMESPACE_CONTRACT_PATH)
