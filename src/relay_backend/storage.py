@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Protocol
+from uuid import UUID
+
+
+class BlobStorage(Protocol):
+    def save(self, namespace_id: UUID, record_id: UUID, filename: str, data: bytes) -> str: ...
+    def read(self, namespace_id: UUID, record_id: UUID, filename: str) -> bytes: ...
+    def delete(self, namespace_id: UUID, record_id: UUID, filename: str) -> None: ...
+
+
+class LocalBlobStorage:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def save(self, namespace_id: UUID, record_id: UUID, filename: str, data: bytes) -> str:
+        directory = self.root / str(namespace_id) / str(record_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / filename
+        path.write_bytes(data)
+        return f"{namespace_id}/{record_id}/{filename}"
+
+    def read(self, namespace_id: UUID, record_id: UUID, filename: str) -> bytes:
+        path = self.root / str(namespace_id) / str(record_id) / filename
+        if not path.is_file():
+            raise FileNotFoundError(f"Blob not found: {namespace_id}/{record_id}/{filename}")
+        return path.read_bytes()
+
+    def delete(self, namespace_id: UUID, record_id: UUID, filename: str) -> None:
+        path = self.root / str(namespace_id) / str(record_id) / filename
+        if path.is_file():
+            path.unlink()

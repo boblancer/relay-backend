@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -11,20 +12,27 @@ from scalar_fastapi import AgentScalarConfig, OpenAPISource, get_scalar_api_refe
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from relay_backend.contract import load_automation_openapi_contract, load_openapi_contract
+from relay_backend.controllers.namespaces import router as namespace_router
 from relay_backend.controllers.workflows import router as workflow_router
 from relay_backend.data.database import Database
 from relay_backend.errors import (
     AuthenticationError,
+    BlobNotFoundError,
+    DuplicateNameError,
     IdempotencyConflictError,
+    NamespaceNotFoundError,
     PersistenceUnavailableError,
+    RecordNotFoundError,
     RevisionConflictError,
     ValidationFailedError,
     WorkflowError,
     WorkflowNotFoundError,
 )
 from relay_backend.request_limits import RequestBodyLimitMiddleware
+from relay_backend.services.namespaces import NamespaceService
 from relay_backend.services.workflows import WorkflowService
 from relay_backend.settings import Settings
+from relay_backend.storage import LocalBlobStorage
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +41,7 @@ def create_app(
     *,
     settings: Settings | None = None,
     service: WorkflowService | None = None,
+    namespace_service: NamespaceService | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -40,12 +49,20 @@ def create_app(
         app.state.settings = runtime_settings
         if service is not None:
             app.state.workflow_service = service
+            if namespace_service is not None:
+                app.state.namespace_service = namespace_service
             yield
             return
 
         database = Database(runtime_settings.database_url)
         database.open()
         app.state.workflow_service = WorkflowService(database)
+
+        storage_root = Path(runtime_settings.blob_storage_root)
+        storage_root.mkdir(parents=True, exist_ok=True)
+        storage = LocalBlobStorage(storage_root)
+        app.state.namespace_service = NamespaceService(database, storage)
+
         try:
             yield
         finally:
@@ -88,6 +105,7 @@ def create_app(
 
     app.add_middleware(RequestBodyLimitMiddleware)
     app.include_router(workflow_router)
+    app.include_router(namespace_router)
     _install_error_handlers(app)
     return app
 
@@ -132,10 +150,15 @@ def _install_error_handlers(app: FastAPI) -> None:
             )
         if isinstance(error, ValidationFailedError):
             return _error_response(400, "validation_failed", str(error))
-        if isinstance(error, WorkflowNotFoundError):
+        if isinstance(
+            error,
+            (WorkflowNotFoundError, NamespaceNotFoundError, RecordNotFoundError, BlobNotFoundError),
+        ):
             return _error_response(404, "not_found", str(error))
         if isinstance(error, RevisionConflictError):
             return _error_response(409, "revision_conflict", str(error))
+        if isinstance(error, DuplicateNameError):
+            return _error_response(409, "duplicate_name", str(error))
         if isinstance(error, IdempotencyConflictError):
             return _error_response(409, "idempotency_conflict", str(error))
         if isinstance(error, PersistenceUnavailableError):
