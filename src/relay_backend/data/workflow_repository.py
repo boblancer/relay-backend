@@ -23,10 +23,9 @@ class IdempotencyReplay:
 
 
 class WorkflowRepository:
-    def list_summaries(self, connection: Connection, namespace_id: int) -> list[WorkflowSummary]:
+    def list_summaries(self, connection: Connection) -> list[WorkflowSummary]:
         rows = connection.execute(
-            "SELECT summary FROM workflows WHERE namespace_id = %s ORDER BY updated_at DESC",
-            (namespace_id,),
+            "SELECT summary FROM workflows ORDER BY updated_at DESC"
         ).fetchall()
         return [WorkflowSummary.model_validate(row["summary"]) for row in rows]
 
@@ -48,19 +47,12 @@ class WorkflowRepository:
             raise WorkflowNotFoundError
         return Workflow.model_validate(row["document"])
 
-    def insert(
-        self,
-        connection: Connection,
-        workflow: Workflow,
-        summary: WorkflowSummary,
-        namespace_id: int,
-    ) -> None:
+    def insert(self, connection: Connection, workflow: Workflow, summary: WorkflowSummary) -> None:
         connection.execute(
             """
             INSERT INTO workflows (
-                id, revision, status, created_at, updated_at, finished_at,
-                document, summary, namespace_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                id, revision, status, created_at, updated_at, finished_at, document, summary
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 workflow.id,
@@ -71,7 +63,6 @@ class WorkflowRepository:
                 workflow.finished_at,
                 Jsonb(_model_json(workflow)),
                 Jsonb(_model_json(summary)),
-                namespace_id,
             ),
         )
 
@@ -108,16 +99,6 @@ class WorkflowRepository:
         )
         if cursor.rowcount != 1:
             raise RevisionConflictError
-
-    def update_file_url(
-        self, connection: Connection, workflow_id: UUID, file_url: str
-    ) -> None:
-        cursor = connection.execute(
-            "UPDATE workflows SET file_url = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-            (file_url, workflow_id),
-        )
-        if cursor.rowcount != 1:
-            raise WorkflowNotFoundError
 
     def claim_idempotency(
         self,

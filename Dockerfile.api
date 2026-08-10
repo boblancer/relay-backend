@@ -4,7 +4,7 @@ RUN pip install --no-cache-dir uv
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md openapi.yaml namespace_openapi.yaml ./
+COPY pyproject.toml uv.lock README.md openapi.yaml ./
 COPY packages/automation-service-browserbase/openapi.yaml packages/automation-service-browserbase/openapi.yaml
 COPY src/ src/
 RUN uv sync --frozen --no-dev

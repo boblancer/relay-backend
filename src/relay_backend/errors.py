@@ -38,18 +38,3 @@ class PersistenceUnavailableError(WorkflowError):
 class InternalPersistenceError(WorkflowError):
     def __init__(self) -> None:
         super().__init__("The workflow storage operation failed.")
-
-
-class NamespaceNotFoundError(WorkflowError):
-    def __init__(self) -> None:
-        super().__init__("The namespace was not found.")
-
-
-class DuplicateNameError(WorkflowError):
-    def __init__(self) -> None:
-        super().__init__("A resource with that name already exists.")
-
-
-class BlobNotFoundError(WorkflowError):
-    def __init__(self) -> None:
-        super().__init__("The file was not found.")
