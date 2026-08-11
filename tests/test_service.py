@@ -6,16 +6,24 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from relay_backend.data.database import Database
 from relay_backend.errors import (
     IdempotencyConflictError,
+    PersistenceUnavailableError,
     RevisionConflictError,
     ValidationFailedError,
 )
-from relay_backend.models.workflows import SaveWorkflowRequest, Workflow, WorkflowStatus
+from relay_backend.models.workflows import (
+    SaveWorkflowRequest,
+    Workflow,
+    WorkflowStatus,
+    to_workflow_summary,
+)
 from relay_backend.services.workflows import WorkflowService
 from tests.conftest import DATABASE_URL
+from tests.fakes import InMemoryWorkflowDocumentStore
 from tests.test_models import workflow_document
 
 
@@ -30,9 +38,18 @@ def database() -> Database:
 
 
 @pytest.fixture
-def service(database: Database) -> WorkflowService:
+def document_store() -> InMemoryWorkflowDocumentStore:
+    return InMemoryWorkflowDocumentStore()
+
+
+@pytest.fixture
+def service(
+    database: Database,
+    document_store: InMemoryWorkflowDocumentStore,
+) -> WorkflowService:
     return WorkflowService(
         database,
+        document_store,
         clock=lambda: datetime(2026, 7, 30, 12, tzinfo=UTC),
     )
 
@@ -52,7 +69,10 @@ def edited_request(workflow: Workflow, expected_revision: int | None = None) -> 
     )
 
 
-def test_create_replays_the_original_workflow(service: WorkflowService) -> None:
+def test_create_replays_the_original_workflow(
+    service: WorkflowService,
+    document_store: InMemoryWorkflowDocumentStore,
+) -> None:
     key = uuid4()
 
     created = service.create(key)
@@ -66,9 +86,13 @@ def test_create_replays_the_original_workflow(service: WorkflowService) -> None:
     assert created.source.provider == "browserbase"
     assert created.source.session_id == ""
     assert created.steps == []
+    assert document_store.put_calls == 1
     with psycopg.connect(DATABASE_URL) as connection:
         assert connection.execute("SELECT count(*) FROM workflows").fetchone() == (1,)
         assert connection.execute("SELECT count(*) FROM idempotency_records").fetchone() == (1,)
+        assert connection.execute(
+            "SELECT document IS NULL, document_key IS NOT NULL FROM workflows"
+        ).fetchone() == (True, True)
 
 
 def test_save_preserves_server_fields_and_replays_before_revision_check(
@@ -115,13 +139,17 @@ def test_finish_sets_lifecycle_once_and_requires_a_step(service: WorkflowService
     assert second.finished_at == first.finished_at
 
 
-def test_failed_revision_does_not_consume_idempotency_key(service: WorkflowService) -> None:
+def test_failed_revision_does_not_consume_idempotency_key(
+    service: WorkflowService,
+    document_store: InMemoryWorkflowDocumentStore,
+) -> None:
     created = service.create(uuid4())
     key = uuid4()
 
     with pytest.raises(RevisionConflictError):
         service.save(created.id, edited_request(created, expected_revision=99), key)
 
+    assert document_store.put_calls == 1
     saved = service.save(created.id, edited_request(created), key)
 
     assert saved.revision == 2
@@ -180,6 +208,7 @@ def test_route_and_document_ids_must_match(service: WorkflowService) -> None:
 
 def test_concurrent_saves_allow_exactly_one_revision_winner(
     service: WorkflowService,
+    document_store: InMemoryWorkflowDocumentStore,
 ) -> None:
     created = service.create(uuid4())
     left = edited_request(created)
@@ -197,35 +226,93 @@ def test_concurrent_saves_allow_exactly_one_revision_winner(
 
     assert sum(isinstance(outcome, Workflow) for outcome in outcomes) == 1
     assert sum(isinstance(outcome, RevisionConflictError) for outcome in outcomes) == 1
+    assert document_store.put_calls == 2
     assert service.get(created.id).revision == 2
 
 
 def test_list_reads_safe_summaries_without_sensitive_document_values(
     service: WorkflowService,
+    document_store: InMemoryWorkflowDocumentStore,
 ) -> None:
     created = service.create(uuid4())
     saved = service.save(created.id, edited_request(created), uuid4())
 
+    reads_before_list = document_store.get_calls
     summaries = service.list()
 
     assert summaries.workflows[0].id == saved.id
     assert [step.order for step in summaries.workflows[0].steps] == [0, 1]
     assert "4111111111111111" not in repr(summaries)
     assert "sensitive-session" not in repr(summaries)
+    assert document_store.get_calls == reads_before_list
     assert service.get(UUID(str(created.id))).source.session_id == "sensitive-session"
 
 
-def test_list_orders_workflows_by_most_recent_update(database: Database) -> None:
+def test_list_orders_workflows_by_most_recent_update(
+    database: Database,
+    document_store: InMemoryWorkflowDocumentStore,
+) -> None:
     timestamps = iter(
         (
             datetime(2026, 7, 30, 12, tzinfo=UTC),
             datetime(2026, 7, 30, 13, tzinfo=UTC),
         )
     )
-    service = WorkflowService(database, clock=lambda: next(timestamps))
+    service = WorkflowService(database, document_store, clock=lambda: next(timestamps))
     older = service.create(uuid4())
     newer = service.create(uuid4())
 
     listed = service.list()
 
     assert [summary.id for summary in listed.workflows] == [newer.id, older.id]
+
+
+def test_legacy_jsonb_document_remains_readable(
+    database: Database,
+    document_store: InMemoryWorkflowDocumentStore,
+) -> None:
+    workflow = Workflow.model_validate(workflow_document())
+    summary = to_workflow_summary(workflow)
+    with psycopg.connect(DATABASE_URL) as connection:
+        connection.execute(
+            """
+            INSERT INTO workflows (
+                id, revision, status, created_at, updated_at, finished_at,
+                document, document_key, summary
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s)
+            """,
+            (
+                workflow.id,
+                workflow.revision,
+                workflow.status,
+                workflow.created_at,
+                workflow.updated_at,
+                workflow.finished_at,
+                Jsonb(workflow.model_dump(mode="json", by_alias=True, exclude_none=True)),
+                Jsonb(summary.model_dump(mode="json", by_alias=True, exclude_none=True)),
+            ),
+        )
+
+    service = WorkflowService(database, document_store)
+
+    assert service.get(workflow.id) == workflow
+    assert document_store.get_calls == 0
+
+
+def test_failed_document_write_rolls_back_the_idempotency_claim(
+    database: Database,
+    document_store: InMemoryWorkflowDocumentStore,
+) -> None:
+    service = WorkflowService(database, document_store)
+    key = uuid4()
+    document_store.put_error = PersistenceUnavailableError()
+
+    with pytest.raises(PersistenceUnavailableError):
+        service.create(key)
+
+    document_store.put_error = None
+    created = service.create(key)
+
+    assert created.revision == 1
+    with psycopg.connect(DATABASE_URL) as connection:
+        assert connection.execute("SELECT count(*) FROM idempotency_records").fetchone() == (1,)

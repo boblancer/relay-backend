@@ -22,6 +22,12 @@ class IdempotencyReplay:
     body: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class WorkflowDocumentLocation:
+    object_key: str | None
+    legacy_document: Workflow | None
+
+
 class WorkflowRepository:
     def list_summaries(self, connection: Connection) -> list[WorkflowSummary]:
         rows = connection.execute(
@@ -29,30 +35,37 @@ class WorkflowRepository:
         ).fetchall()
         return [WorkflowSummary.model_validate(row["summary"]) for row in rows]
 
-    def get(self, connection: Connection, workflow_id: UUID) -> Workflow:
+    def get(self, connection: Connection, workflow_id: UUID) -> WorkflowDocumentLocation:
         row = connection.execute(
-            "SELECT document FROM workflows WHERE id = %s",
+            "SELECT document_key, document FROM workflows WHERE id = %s",
             (workflow_id,),
         ).fetchone()
         if row is None:
             raise WorkflowNotFoundError
-        return Workflow.model_validate(row["document"])
+        return _document_location(row)
 
-    def lock(self, connection: Connection, workflow_id: UUID) -> Workflow:
+    def lock(self, connection: Connection, workflow_id: UUID) -> WorkflowDocumentLocation:
         row = connection.execute(
-            "SELECT document FROM workflows WHERE id = %s FOR UPDATE",
+            "SELECT document_key, document FROM workflows WHERE id = %s FOR UPDATE",
             (workflow_id,),
         ).fetchone()
         if row is None:
             raise WorkflowNotFoundError
-        return Workflow.model_validate(row["document"])
+        return _document_location(row)
 
-    def insert(self, connection: Connection, workflow: Workflow, summary: WorkflowSummary) -> None:
+    def insert(
+        self,
+        connection: Connection,
+        workflow: Workflow,
+        summary: WorkflowSummary,
+        document_key: str,
+    ) -> None:
         connection.execute(
             """
             INSERT INTO workflows (
-                id, revision, status, created_at, updated_at, finished_at, document, summary
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                id, revision, status, created_at, updated_at, finished_at,
+                document, document_key, summary
+            ) VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, %s)
             """,
             (
                 workflow.id,
@@ -61,7 +74,7 @@ class WorkflowRepository:
                 workflow.created_at,
                 workflow.updated_at,
                 workflow.finished_at,
-                Jsonb(_model_json(workflow)),
+                document_key,
                 Jsonb(_model_json(summary)),
             ),
         )
@@ -71,6 +84,7 @@ class WorkflowRepository:
         connection: Connection,
         workflow: Workflow,
         summary: WorkflowSummary,
+        document_key: str,
         *,
         expected_revision: int,
     ) -> None:
@@ -81,7 +95,8 @@ class WorkflowRepository:
                    status = %s,
                    updated_at = %s,
                    finished_at = %s,
-                   document = %s,
+                   document = NULL,
+                   document_key = %s,
                    summary = %s
              WHERE id = %s
                AND revision = %s
@@ -91,7 +106,7 @@ class WorkflowRepository:
                 workflow.status,
                 workflow.updated_at,
                 workflow.finished_at,
-                Jsonb(_model_json(workflow)),
+                document_key,
                 Jsonb(_model_json(summary)),
                 workflow.id,
                 expected_revision,
@@ -166,5 +181,13 @@ class WorkflowRepository:
             raise InternalPersistenceError
 
 
-def _model_json(model: Workflow | WorkflowSummary) -> dict[str, Any]:
+def _document_location(row: dict[str, Any]) -> WorkflowDocumentLocation:
+    document = row["document"]
+    return WorkflowDocumentLocation(
+        object_key=row["document_key"],
+        legacy_document=Workflow.model_validate(document) if document is not None else None,
+    )
+
+
+def _model_json(model: WorkflowSummary) -> dict[str, Any]:
     return model.model_dump(mode="json", by_alias=True, exclude_none=True)

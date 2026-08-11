@@ -4,6 +4,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import boto3
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -13,6 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from relay_backend.contract import load_automation_openapi_contract, load_openapi_contract
 from relay_backend.controllers.workflows import router as workflow_router
 from relay_backend.data.database import Database
+from relay_backend.document_store import S3WorkflowDocumentStore
 from relay_backend.errors import (
     AuthenticationError,
     IdempotencyConflictError,
@@ -27,6 +29,17 @@ from relay_backend.services.workflows import WorkflowService
 from relay_backend.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _create_document_store(settings: Settings) -> S3WorkflowDocumentStore:
+    client = boto3.client(
+        "s3",
+        endpoint_url=settings.endpoint,
+        aws_access_key_id=settings.access_key_id.get_secret_value(),
+        aws_secret_access_key=settings.secret_access_key.get_secret_value(),
+        region_name=settings.region,
+    )
+    return S3WorkflowDocumentStore(client, bucket=settings.bucket)
 
 
 def create_app(
@@ -45,7 +58,8 @@ def create_app(
 
         database = Database(runtime_settings.database_url)
         database.open()
-        app.state.workflow_service = WorkflowService(database)
+        document_store = _create_document_store(runtime_settings)
+        app.state.workflow_service = WorkflowService(database, document_store)
         try:
             yield
         finally:

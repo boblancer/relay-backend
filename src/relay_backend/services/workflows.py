@@ -12,7 +12,11 @@ from psycopg_pool import PoolTimeout
 from pydantic import ValidationError
 
 from relay_backend.data.database import Database
-from relay_backend.data.workflow_repository import WorkflowRepository
+from relay_backend.data.workflow_repository import (
+    WorkflowDocumentLocation,
+    WorkflowRepository,
+)
+from relay_backend.document_store import WorkflowDocumentStore
 from relay_backend.errors import (
     InternalPersistenceError,
     PersistenceUnavailableError,
@@ -35,12 +39,14 @@ class WorkflowService:
     def __init__(
         self,
         database: Database,
+        document_store: WorkflowDocumentStore,
         *,
         repository: WorkflowRepository | None = None,
         clock: Callable[[], datetime] | None = None,
         uuid_factory: Callable[[], UUID] | None = None,
     ) -> None:
         self.database = database
+        self.document_store = document_store
         self.repository = repository or WorkflowRepository()
         self.clock = clock or (lambda: datetime.now(UTC))
         self.uuid_factory = uuid_factory or uuid4
@@ -76,7 +82,13 @@ class WorkflowService:
                 source=WorkflowSource(provider="browserbase", session_id=""),
                 steps=[],
             )
-            self.repository.insert(connection, workflow, to_workflow_summary(workflow))
+            document_key = self.document_store.put(workflow)
+            self.repository.insert(
+                connection,
+                workflow,
+                to_workflow_summary(workflow),
+                document_key,
+            )
             self.repository.complete_idempotency(
                 connection,
                 key=idempotency_key,
@@ -87,7 +99,8 @@ class WorkflowService:
 
     def get(self, workflow_id: UUID) -> Workflow:
         with self._transaction() as connection:
-            return self.repository.get(connection, workflow_id)
+            location = self.repository.get(connection, workflow_id)
+        return self._load_document(location)
 
     def save(
         self,
@@ -110,14 +123,16 @@ class WorkflowService:
             if replay is not None:
                 return Workflow.model_validate(replay.body)
 
-            current = self.repository.lock(connection, workflow_id)
+            current = self._load_document(self.repository.lock(connection, workflow_id))
             if current.revision != request.expected_revision:
                 raise RevisionConflictError
             saved = self._next_snapshot(current, request.workflow)
+            document_key = self.document_store.put(saved)
             self.repository.update(
                 connection,
                 saved,
                 to_workflow_summary(saved),
+                document_key,
                 expected_revision=current.revision,
             )
             self.repository.complete_idempotency(
@@ -151,7 +166,7 @@ class WorkflowService:
             if replay is not None:
                 return Workflow.model_validate(replay.body)
 
-            current = self.repository.lock(connection, workflow_id)
+            current = self._load_document(self.repository.lock(connection, workflow_id))
             if current.revision != request.expected_revision:
                 raise RevisionConflictError
             now = self.clock()
@@ -162,10 +177,12 @@ class WorkflowService:
                 finished_at=current.finished_at or now,
                 updated_at=now,
             )
+            document_key = self.document_store.put(finished)
             self.repository.update(
                 connection,
                 finished,
                 to_workflow_summary(finished),
+                document_key,
                 expected_revision=current.revision,
             )
             self.repository.complete_idempotency(
@@ -175,6 +192,13 @@ class WorkflowService:
                 body=_workflow_json(finished),
             )
             return finished
+
+    def _load_document(self, location: WorkflowDocumentLocation) -> Workflow:
+        if location.object_key is not None:
+            return self.document_store.get(location.object_key)
+        if location.legacy_document is not None:
+            return location.legacy_document
+        raise InternalPersistenceError
 
     def _next_snapshot(
         self,

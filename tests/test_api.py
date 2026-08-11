@@ -17,6 +17,7 @@ from relay_backend.main import create_app
 from relay_backend.services.workflows import WorkflowService
 from relay_backend.settings import Settings
 from tests.conftest import DATABASE_URL
+from tests.fakes import InMemoryWorkflowDocumentStore
 from tests.test_models import workflow_document
 
 MAX_REQUEST_BYTES = 1_048_576
@@ -28,12 +29,18 @@ def client() -> Iterator[TestClient]:
     database.open()
     service = WorkflowService(
         database,
+        InMemoryWorkflowDocumentStore(),
         clock=lambda: datetime(2026, 7, 30, 12, tzinfo=UTC),
     )
     settings = Settings(
         database_url=DATABASE_URL,
         basic_auth_username="relay",
         basic_auth_password="test-password",
+        bucket="relay-workflows",
+        endpoint="https://storage.railway.app",
+        access_key_id="test-access-key",
+        secret_access_key="test-secret-key",
+        region="auto",
         _env_file=None,
     )
     token = base64.b64encode(b"relay:test-password").decode()
@@ -68,6 +75,21 @@ def test_settings_reject_an_empty_shared_password() -> None:
             database_url=DATABASE_URL,
             basic_auth_username="relay",
             basic_auth_password="",
+            bucket="relay-workflows",
+            endpoint="https://storage.railway.app",
+            access_key_id="test-access-key",
+            secret_access_key="test-secret-key",
+            region="auto",
+            _env_file=None,
+        )
+
+
+def test_settings_require_railway_bucket_credentials() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url=DATABASE_URL,
+            basic_auth_username="relay",
+            basic_auth_password="test-password",
             _env_file=None,
         )
 
@@ -76,7 +98,12 @@ def test_settings_ignore_dotenv_local(tmp_path, monkeypatch: pytest.MonkeyPatch)
     (tmp_path / ".env").write_text(
         "DATABASE_URL=postgresql://relay:relay@localhost:5432/relay\n"
         "BASIC_AUTH_USERNAME=relay\n"
-        "BASIC_AUTH_PASSWORD=relay-password\n",
+        "BASIC_AUTH_PASSWORD=relay-password\n"
+        "BUCKET=relay-workflows\n"
+        "ENDPOINT=https://storage.railway.app\n"
+        "ACCESS_KEY_ID=test-access-key\n"
+        "SECRET_ACCESS_KEY=test-secret-key\n"
+        "REGION=auto\n",
         encoding="utf-8",
     )
     (tmp_path / ".env.local").write_text(
@@ -89,11 +116,60 @@ def test_settings_ignore_dotenv_local(tmp_path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("BASIC_AUTH_USERNAME", raising=False)
     monkeypatch.delenv("BASIC_AUTH_PASSWORD", raising=False)
+    monkeypatch.delenv("BUCKET", raising=False)
+    monkeypatch.delenv("ENDPOINT", raising=False)
+    monkeypatch.delenv("ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("REGION", raising=False)
 
     settings = Settings()
 
     assert settings.basic_auth_username == "relay"
     assert settings.basic_auth_password.get_secret_value() == "relay-password"
+    assert settings.bucket == "relay-workflows"
+    assert settings.endpoint == "https://storage.railway.app"
+    assert settings.access_key_id.get_secret_value() == "test-access-key"
+    assert settings.secret_access_key.get_secret_value() == "test-secret-key"
+    assert settings.region == "auto"
+
+
+def test_runtime_assembles_the_railway_document_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+    s3_client = object()
+
+    def create_s3_client(service_name: str, **kwargs):
+        captured["service_name"] = service_name
+        captured.update(kwargs)
+        return s3_client
+
+    monkeypatch.setattr("relay_backend.main.boto3.client", create_s3_client)
+    settings = Settings(
+        database_url=DATABASE_URL,
+        basic_auth_username="relay",
+        basic_auth_password="test-password",
+        bucket="relay-workflows",
+        endpoint="https://storage.railway.app",
+        access_key_id="test-access-key",
+        secret_access_key="test-secret-key",
+        region="auto",
+        _env_file=None,
+    )
+    app = create_app(settings=settings)
+
+    with TestClient(app):
+        document_store = app.state.workflow_service.document_store
+
+    assert document_store.client is s3_client
+    assert document_store.bucket == "relay-workflows"
+    assert captured == {
+        "service_name": "s3",
+        "endpoint_url": "https://storage.railway.app",
+        "aws_access_key_id": "test-access-key",
+        "aws_secret_access_key": "test-secret-key",
+        "region_name": "auto",
+    }
 
 
 def test_api_requires_shared_basic_credentials(client: TestClient) -> None:
@@ -309,9 +385,17 @@ def test_unavailable_pool_returns_safe_503() -> None:
         database_url=DATABASE_URL,
         basic_auth_username="relay",
         basic_auth_password="test-password",
+        bucket="relay-workflows",
+        endpoint="https://storage.railway.app",
+        access_key_id="test-access-key",
+        secret_access_key="test-secret-key",
+        region="auto",
         _env_file=None,
     )
-    app = create_app(settings=settings, service=WorkflowService(database))
+    app = create_app(
+        settings=settings,
+        service=WorkflowService(database, InMemoryWorkflowDocumentStore()),
+    )
 
     with TestClient(app, raise_server_exceptions=False) as unavailable_client:
         response = unavailable_client.get("/v1/workflows", auth=("relay", "test-password"))
@@ -334,6 +418,11 @@ def test_unexpected_failure_returns_safe_500() -> None:
         database_url=DATABASE_URL,
         basic_auth_username="relay",
         basic_auth_password="test-password",
+        bucket="relay-workflows",
+        endpoint="https://storage.railway.app",
+        access_key_id="test-access-key",
+        secret_access_key="test-secret-key",
+        region="auto",
         _env_file=None,
     )
     app = create_app(settings=settings, service=ExplodingService())
