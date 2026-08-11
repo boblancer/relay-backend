@@ -28,6 +28,12 @@ class WorkflowDocumentLocation:
     legacy_document: Workflow | None
 
 
+@dataclass(frozen=True)
+class LegacyWorkflowDocument:
+    workflow: Workflow
+    revision: int
+
+
 class WorkflowRepository:
     def list_summaries(self, connection: Connection) -> list[WorkflowSummary]:
         rows = connection.execute(
@@ -114,6 +120,51 @@ class WorkflowRepository:
         )
         if cursor.rowcount != 1:
             raise RevisionConflictError
+
+    def list_legacy_documents(
+        self,
+        connection: Connection,
+        *,
+        limit: int,
+    ) -> list[LegacyWorkflowDocument]:
+        rows = connection.execute(
+            """
+            SELECT revision, document
+              FROM workflows
+             WHERE document_key IS NULL
+             ORDER BY id
+             LIMIT %s
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            LegacyWorkflowDocument(
+                workflow=Workflow.model_validate(row["document"]),
+                revision=row["revision"],
+            )
+            for row in rows
+        ]
+
+    def publish_backfilled_document(
+        self,
+        connection: Connection,
+        *,
+        workflow_id: UUID,
+        revision: int,
+        document_key: str,
+    ) -> bool:
+        cursor = connection.execute(
+            """
+            UPDATE workflows
+               SET document = NULL,
+                   document_key = %s
+             WHERE id = %s
+               AND revision = %s
+               AND document_key IS NULL
+            """,
+            (document_key, workflow_id, revision),
+        )
+        return cursor.rowcount == 1
 
     def claim_idempotency(
         self,
