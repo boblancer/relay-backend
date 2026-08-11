@@ -94,6 +94,18 @@ def test_settings_require_railway_bucket_credentials() -> None:
         )
 
 
+def test_settings_validation_does_not_render_configuration_values() -> None:
+    marker = "leakme"
+
+    with pytest.raises(ValidationError) as error:
+        Settings(
+            database_url=marker,
+            _env_file=None,
+        )
+
+    assert marker not in str(error.value)
+
+
 def test_settings_ignore_dotenv_local(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / ".env").write_text(
         "DATABASE_URL=postgresql://relay:relay@localhost:5432/relay\n"
