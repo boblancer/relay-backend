@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 from relay_backend.data.database import Database
 from relay_backend.errors import (
     IdempotencyConflictError,
+    InternalPersistenceError,
     PersistenceUnavailableError,
     RevisionConflictError,
     ValidationFailedError,
@@ -97,6 +98,7 @@ def test_create_replays_the_original_workflow(
 
 def test_save_preserves_server_fields_and_replays_before_revision_check(
     service: WorkflowService,
+    document_store: InMemoryWorkflowDocumentStore,
 ) -> None:
     created = service.create(uuid4())
     request = edited_request(created)
@@ -114,6 +116,7 @@ def test_save_preserves_server_fields_and_replays_before_revision_check(
     assert saved.revision == 2
     assert saved.created_at == created.created_at
     assert saved.updated_at == datetime(2026, 7, 30, 12, tzinfo=UTC)
+    assert document_store.put_calls == 2
 
 
 def test_finish_sets_lifecycle_once_and_requires_a_step(service: WorkflowService) -> None:
@@ -316,3 +319,40 @@ def test_failed_document_write_rolls_back_the_idempotency_claim(
     assert created.revision == 1
     with psycopg.connect(DATABASE_URL) as connection:
         assert connection.execute("SELECT count(*) FROM idempotency_records").fetchone() == (1,)
+
+
+def test_failed_document_read_rolls_back_the_idempotency_claim(
+    service: WorkflowService,
+    document_store: InMemoryWorkflowDocumentStore,
+) -> None:
+    created = service.create(uuid4())
+    key = uuid4()
+    document_store.get_error = PersistenceUnavailableError()
+
+    with pytest.raises(PersistenceUnavailableError):
+        service.save(created.id, edited_request(created), key)
+
+    document_store.get_error = None
+    saved = service.save(created.id, edited_request(created), key)
+
+    assert saved.revision == 2
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        {"id": uuid4()},
+        {"revision": 99},
+    ],
+)
+def test_get_rejects_documents_that_disagree_with_relational_metadata(
+    service: WorkflowService,
+    document_store: InMemoryWorkflowDocumentStore,
+    replacement: dict,
+) -> None:
+    created = service.create(uuid4())
+    object_key = next(iter(document_store.objects))
+    document_store.objects[object_key] = created.model_copy(update=replacement)
+
+    with pytest.raises(InternalPersistenceError):
+        service.get(created.id)

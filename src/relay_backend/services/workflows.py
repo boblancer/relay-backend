@@ -195,10 +195,14 @@ class WorkflowService:
 
     def _load_document(self, location: WorkflowDocumentLocation) -> Workflow:
         if location.object_key is not None:
-            return self.document_store.get(location.object_key)
-        if location.legacy_document is not None:
-            return location.legacy_document
-        raise InternalPersistenceError
+            workflow = self.document_store.get(location.object_key)
+        elif location.legacy_document is not None:
+            workflow = location.legacy_document
+        else:
+            raise InternalPersistenceError
+        if workflow.id != location.workflow_id or workflow.revision != location.revision:
+            raise InternalPersistenceError
+        return workflow
 
     def _next_snapshot(
         self,

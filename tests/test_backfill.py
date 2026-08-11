@@ -8,7 +8,7 @@ from psycopg.types.json import Jsonb
 
 from relay_backend.backfill_workflow_documents import backfill_workflow_documents
 from relay_backend.data.database import Database
-from relay_backend.errors import PersistenceUnavailableError
+from relay_backend.errors import InternalPersistenceError, PersistenceUnavailableError
 from relay_backend.models.workflows import Workflow, to_workflow_summary
 from tests.conftest import DATABASE_URL
 from tests.fakes import InMemoryWorkflowDocumentStore
@@ -25,7 +25,12 @@ def database() -> Database:
         instance.close()
 
 
-def _insert_legacy_workflow(workflow: Workflow) -> None:
+def _insert_legacy_workflow(
+    workflow: Workflow,
+    *,
+    row_id=None,
+    row_revision: int | None = None,
+) -> None:
     summary = to_workflow_summary(workflow)
     with psycopg.connect(DATABASE_URL) as connection:
         connection.execute(
@@ -36,8 +41,8 @@ def _insert_legacy_workflow(workflow: Workflow) -> None:
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s)
             """,
             (
-                workflow.id,
-                workflow.revision,
+                row_id or workflow.id,
+                row_revision or workflow.revision,
                 workflow.status,
                 workflow.created_at,
                 workflow.updated_at,
@@ -73,8 +78,15 @@ def test_backfill_moves_legacy_documents_without_changing_metadata(
     assert all(row[6] is None for row in rows)
     assert all(row[7] in store.objects for row in rows)
     assert {row[1] for row in rows} == {1}
+    assert {row[3] for row in rows} == {first.created_at}
     assert {row[4] for row in rows} == {first.updated_at}
+    assert {row[5] for row in rows} == {first.finished_at}
     assert {row[2] for row in rows} == {"draft"}
+    summaries = {
+        first.id: to_workflow_summary(first).model_dump(mode="json", by_alias=True),
+        second.id: to_workflow_summary(second).model_dump(mode="json", by_alias=True),
+    }
+    assert all(row[8] == summaries[row[0]] for row in rows)
 
     replay = backfill_workflow_documents(database, store, batch_size=1)
 
@@ -133,3 +145,25 @@ def test_backfill_storage_failure_leaves_the_legacy_document_recoverable(
         ).fetchone()
     assert row[0] is not None
     assert row[1] is None
+
+
+@pytest.mark.parametrize(
+    ("row_id", "row_revision"),
+    [
+        (uuid4(), None),
+        (None, 2),
+    ],
+)
+def test_backfill_rejects_legacy_documents_that_disagree_with_their_row(
+    database: Database,
+    row_id,
+    row_revision: int | None,
+) -> None:
+    workflow = Workflow.model_validate(workflow_document()).model_copy(update={"id": uuid4()})
+    _insert_legacy_workflow(workflow, row_id=row_id, row_revision=row_revision)
+    store = InMemoryWorkflowDocumentStore()
+
+    with pytest.raises(InternalPersistenceError):
+        backfill_workflow_documents(database, store)
+
+    assert store.put_calls == 0

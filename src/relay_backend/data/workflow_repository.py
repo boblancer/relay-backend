@@ -6,6 +6,7 @@ from uuid import UUID
 
 from psycopg import Connection
 from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
 from relay_backend.errors import (
     IdempotencyConflictError,
@@ -24,6 +25,8 @@ class IdempotencyReplay:
 
 @dataclass(frozen=True)
 class WorkflowDocumentLocation:
+    workflow_id: UUID
+    revision: int
     object_key: str | None
     legacy_document: Workflow | None
 
@@ -43,7 +46,7 @@ class WorkflowRepository:
 
     def get(self, connection: Connection, workflow_id: UUID) -> WorkflowDocumentLocation:
         row = connection.execute(
-            "SELECT document_key, document FROM workflows WHERE id = %s",
+            "SELECT id, revision, document_key, document FROM workflows WHERE id = %s",
             (workflow_id,),
         ).fetchone()
         if row is None:
@@ -52,7 +55,12 @@ class WorkflowRepository:
 
     def lock(self, connection: Connection, workflow_id: UUID) -> WorkflowDocumentLocation:
         row = connection.execute(
-            "SELECT document_key, document FROM workflows WHERE id = %s FOR UPDATE",
+            """
+            SELECT id, revision, document_key, document
+              FROM workflows
+             WHERE id = %s
+             FOR UPDATE
+            """,
             (workflow_id,),
         ).fetchone()
         if row is None:
@@ -129,7 +137,7 @@ class WorkflowRepository:
     ) -> list[LegacyWorkflowDocument]:
         rows = connection.execute(
             """
-            SELECT revision, document
+            SELECT id, revision, document
               FROM workflows
              WHERE document_key IS NULL
              ORDER BY id
@@ -137,13 +145,11 @@ class WorkflowRepository:
             """,
             (limit,),
         ).fetchall()
-        return [
-            LegacyWorkflowDocument(
-                workflow=Workflow.model_validate(row["document"]),
-                revision=row["revision"],
-            )
-            for row in rows
-        ]
+        documents = []
+        for row in rows:
+            workflow = _validate_document(row["document"], row["id"], row["revision"])
+            documents.append(LegacyWorkflowDocument(workflow=workflow, revision=row["revision"]))
+        return documents
 
     def publish_backfilled_document(
         self,
@@ -235,9 +241,25 @@ class WorkflowRepository:
 def _document_location(row: dict[str, Any]) -> WorkflowDocumentLocation:
     document = row["document"]
     return WorkflowDocumentLocation(
+        workflow_id=row["id"],
+        revision=row["revision"],
         object_key=row["document_key"],
-        legacy_document=Workflow.model_validate(document) if document is not None else None,
+        legacy_document=(
+            _validate_document(document, row["id"], row["revision"])
+            if document is not None
+            else None
+        ),
     )
+
+
+def _validate_document(document: Any, workflow_id: UUID, revision: int) -> Workflow:
+    try:
+        workflow = Workflow.model_validate(document)
+    except ValidationError as error:
+        raise InternalPersistenceError from error
+    if workflow.id != workflow_id or workflow.revision != revision:
+        raise InternalPersistenceError
+    return workflow
 
 
 def _model_json(model: WorkflowSummary) -> dict[str, Any]:

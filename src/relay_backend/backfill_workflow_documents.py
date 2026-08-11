@@ -55,21 +55,23 @@ def backfill_workflow_documents(
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Backfill workflow documents to object storage")
     parser.add_argument("--batch-size", type=int, default=100)
     args = parser.parse_args()
-    settings = Settings()
-    database = Database(settings.database_url)
-    client = boto3.client(
-        "s3",
-        endpoint_url=settings.endpoint,
-        aws_access_key_id=settings.access_key_id.get_secret_value(),
-        aws_secret_access_key=settings.secret_access_key.get_secret_value(),
-        region_name=settings.region,
-    )
-    document_store = S3WorkflowDocumentStore(client, bucket=settings.bucket)
-    database.open()
+    database = None
     try:
+        settings = Settings()
+        database = Database(settings.database_url)
+        client = boto3.client(
+            "s3",
+            endpoint_url=settings.endpoint,
+            aws_access_key_id=settings.access_key_id.get_secret_value(),
+            aws_secret_access_key=settings.secret_access_key.get_secret_value(),
+            region_name=settings.region,
+        )
+        document_store = S3WorkflowDocumentStore(client, bucket=settings.bucket)
+        database.open()
         result = backfill_workflow_documents(
             database,
             document_store,
@@ -79,7 +81,15 @@ def main() -> None:
         logger.error("Workflow document backfill failed with %s", type(error).__name__)
         raise SystemExit(1) from None
     finally:
-        database.close()
+        if database is not None:
+            try:
+                database.close()
+            except Exception as error:
+                logger.error(
+                    "Workflow document backfill cleanup failed with %s",
+                    type(error).__name__,
+                )
+                raise SystemExit(1) from None
     logger.info(
         "Workflow document backfill completed: migrated=%d skipped=%d",
         result.migrated,

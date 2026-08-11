@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import closing
 from typing import Any, Protocol
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -43,13 +44,13 @@ class S3WorkflowDocumentStore:
     def get(self, object_key: str) -> Workflow:
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=object_key)
-            stream = response["Body"]
-            body = stream.read(MAX_REQUEST_BYTES + 1)
+            with closing(response["Body"]) as stream:
+                body = stream.read(MAX_REQUEST_BYTES + 1)
         except BotoCoreError as error:
             raise PersistenceUnavailableError from error
         except ClientError as error:
             _raise_client_error(error)
-        except (KeyError, OSError, TypeError) as error:
+        except (AttributeError, KeyError, OSError, TypeError) as error:
             raise InternalPersistenceError from error
 
         if len(body) > MAX_REQUEST_BYTES:
