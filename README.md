@@ -5,7 +5,9 @@ workflow documents, plus provider-neutral automation, a Browserbase worker, and 
 private internal execution service with streaming and in-memory batch APIs.
 The FastAPI service implements the repository's `openapi.yaml`, including atomic
 revisions, global idempotency, privacy-safe summaries, and shared HTTP Basic
-authentication. It does not execute workflows.
+authentication. Canonical workflow documents live in a private Railway Storage Bucket;
+PostgreSQL stores their active object keys and safe relational metadata. The service does
+not execute workflows.
 
 ## Quick start
 
@@ -14,6 +16,7 @@ Requirements:
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
 - Docker with Compose
+- A private Railway Storage Bucket and its S3-compatible credentials
 - Node.js 24 or newer for automation packages
 
 ```bash
@@ -54,6 +57,7 @@ curl \
 | --- | --- |
 | `docker compose up -d --wait postgres` | Start local PostgreSQL |
 | `uv run alembic upgrade head` | Apply database migrations |
+| `uv run python -m relay_backend.backfill_workflow_documents` | Move legacy JSONB documents to the configured bucket |
 | `uv run uvicorn relay_backend.main:app --reload` | Start the API |
 | `uv run pytest` | Run unit, contract, API, and PostgreSQL integration tests |
 | `uv run ruff check src tests migrations` | Lint Python code |
@@ -85,6 +89,11 @@ docker compose down --volumes
 | `DATABASE_URL` | Psycopg PostgreSQL connection URL |
 | `BASIC_AUTH_USERNAME` | Shared HTTP Basic username |
 | `BASIC_AUTH_PASSWORD` | Shared HTTP Basic password |
+| `BUCKET` | Railway bucket's globally unique S3 API name |
+| `ENDPOINT` | Railway S3 endpoint, normally `https://storage.railway.app` |
+| `ACCESS_KEY_ID` | Private Railway bucket access-key ID |
+| `SECRET_ACCESS_KEY` | Private Railway bucket secret access key |
+| `REGION` | Railway bucket region, normally `auto` |
 | `TEST_DATABASE_URL` | Optional PostgreSQL URL used by tests |
 | `BROWSERBASE_API_KEY` | Browserbase worker credential; required only for real runs |
 | `BROWSERBASE_PROJECT_ID` | Optional Browserbase project selection |
@@ -106,21 +115,38 @@ No credentials are built into the application. Copy `.env.example` to the ignore
 you use. Optional overrides are omitted from the sample; their runtime defaults are
 listed above.
 
+### Railway document-store rollout
+
+Create a private Storage Bucket in each Railway environment and auto-inject its `BUCKET`,
+`ENDPOINT`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, and `REGION` variables into the API
+service. Deploy the migration and dual-read application before running:
+
+```bash
+uv run python -m relay_backend.backfill_workflow_documents --batch-size 100
+```
+
+The command is resumable and never changes revisions, timestamps, summaries, or
+idempotency records. Verify the cutover with
+`SELECT count(*) FROM workflows WHERE document_key IS NULL`; the result must be zero.
+Keep the legacy JSONB column until a later migration after production verification.
+
 ## Architecture
 
 The code uses explicit layers without framework-heavy abstractions:
 
 ```text
-Controller → Service → Data repository → PostgreSQL
-                 ↓
-            Pydantic models
+                         ┌→ Data repository → PostgreSQL metadata and summaries
+Controller → Service ───┤
+                         └→ Document store → private Railway Storage Bucket
 ```
 
 - Controllers translate HTTP requests and responses only.
 - The service owns lifecycle, revision, canonicalization, and idempotency behavior.
-- The data layer owns parameterized SQL and transaction boundaries.
-- PostgreSQL stores the canonical document and a separate safe summary. List queries
-  select only the summary and cannot accidentally return payloads or session IDs.
+- The data layer owns parameterized metadata, pointer, summary, and idempotency SQL.
+- The document store owns deterministic, bounded canonical workflow objects. PostgreSQL
+  publishes the active opaque object key in the same transaction as the safe summary.
+- List queries select only PostgreSQL summaries and cannot accidentally return payloads
+  or session IDs.
 - Alembic uses SQLAlchemy for migrations; runtime queries use Psycopg directly.
 
 [`packages/automation-core`](packages/automation-core/README.md) is an independent ESM
@@ -151,7 +177,10 @@ Successful idempotency records are retained indefinitely. A replay with the same
 method, path, and validated canonical JSON returns the original response even if the
 workflow has since changed. Different content returns `409 idempotency_conflict`.
 
-See [ADR 0001](docs/decisions/0001-postgresql-jsonb-persistence.md) and
+See [ADR 0010](docs/decisions/0010-railway-workflow-document-storage.md) for the
+superseding canonical-document persistence decision. See
+[ADR 0001](docs/decisions/0001-postgresql-jsonb-persistence.md) for the original JSONB
+decision and
 [ADR 0002](docs/decisions/0002-shared-basic-authentication.md) for the POC tradeoffs.
 See [ADR 0003](docs/decisions/0003-standalone-typescript-automation-core.md) for the
 automation-library boundary.
@@ -172,7 +201,7 @@ screenshot capture, persistent local files, and temporary URL access.
 
 The FastAPI service intentionally excludes user accounts, tenants, pagination,
 deletion, workflow-schema migration, collaboration, replay execution,
-application-level encryption, and production deployment configuration. The standalone
+and application-level encryption. The standalone
 automation library excludes browser lifecycle, queues, service endpoints, persistence,
 retries, recording, and interactive replay controls. The Browserbase worker owns only a
 single run. Its HTTP service adds local transport, streaming, health,

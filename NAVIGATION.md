@@ -10,7 +10,8 @@ commands, see [`README.md`](README.md).
 Relay Backend is a local proof-of-concept cloud persistence service for Browser Memory
 Recorder's canonical workflow documents. A caller such as the recorder's local BFF
 sends complete workflow snapshots over HTTP. The backend authenticates the request,
-validates it against the canonical model, and stores the workflow in PostgreSQL.
+validates it against the canonical model, stores the canonical document in a private
+Railway Storage Bucket, and publishes its metadata and active object key in PostgreSQL.
 
 The persistence boundary is the OpenAPI 3.1 contract in [`openapi.yaml`](openapi.yaml).
 It defines five authenticated operations:
@@ -68,12 +69,14 @@ For a first pass through the code, read:
    for SQL, locks, and persistence shapes.
 7. [`src/relay_backend/models/workflows.py`](src/relay_backend/models/workflows.py) for
    canonical models, summaries, and request hashing.
-8. [`tests/`](tests/) for contract, failure, concurrency, and privacy examples.
-9. [`packages/automation-core/README.md`](packages/automation-core/README.md) for the
+8. [`src/relay_backend/document_store.py`](src/relay_backend/document_store.py) for
+   bounded deterministic object serialization and S3 transport.
+9. [`tests/`](tests/) for contract, failure, concurrency, and privacy examples.
+10. [`packages/automation-core/README.md`](packages/automation-core/README.md) for the
    independent background-automation boundary and public TypeScript API.
-10. [`packages/automation-worker-browserbase/README.md`](packages/automation-worker-browserbase/README.md)
+11. [`packages/automation-worker-browserbase/README.md`](packages/automation-worker-browserbase/README.md)
     for Browserbase run configuration, CLI usage, and provider lifecycle.
-11. [`packages/automation-service-browserbase/README.md`](packages/automation-service-browserbase/README.md)
+12. [`packages/automation-service-browserbase/README.md`](packages/automation-service-browserbase/README.md)
     for the streaming and in-memory batch HTTP contract, configuration, and operations.
 
 ## Architecture overview
@@ -96,22 +99,24 @@ Browser Memory Recorder / local BFF
                   v
            Workflow service
        lifecycle | revisions | idempotency
-                  |
-                  v
-      Database transaction context
-                  |
-                  v
-         Workflow repository
-           parameterized SQL
-                  |
-                  v
-             PostgreSQL
+          +-------+-------+
+          |               |
+          v               v
+ Document store      Database transaction
+ deterministic JSON        |
+          |                 v
+          |         Workflow repository
+          |          parameterized SQL
+          v                 v
+ private Railway       PostgreSQL metadata,
+ Storage Bucket        summaries, pointers
 ```
 
 Dependencies point inward from transport to business behavior to persistence. Pydantic
-models are shared by the controller, service, and repository as the canonical in-process
-representation. Controllers do not contain lifecycle rules, and the repository does not
-interpret HTTP requests.
+models are shared by the controller, service, repository, and document store as the
+canonical in-process representation. Controllers do not contain lifecycle rules, the
+repository does not interpret HTTP requests, and object keys never cross the service
+boundary.
 
 Background execution is a sibling Node service rather than another FastAPI layer:
 
@@ -162,7 +167,8 @@ batch/run metadata disappear on restart. The Inngest path does not request captu
 [`src/relay_backend/main.py`](src/relay_backend/main.py) builds the FastAPI application:
 
 - The lifespan handler loads environment-backed settings and opens a Psycopg connection
-  pool. Tests can inject a service and avoid creating the production pool.
+  pool plus an S3-compatible Railway document store. Tests constructor-inject a service
+  with an in-memory store and avoid creating production dependencies.
 - `RequestBodyLimitMiddleware` runs before routing and enforces the 1 MiB body limit
   from the contract, including streamed bodies without a usable `Content-Length`.
 - The workflow router applies shared HTTP Basic authentication to every workflow route.
@@ -186,7 +192,8 @@ batch/run metadata disappear on restart. The Inngest path does not request captu
 | Controller | Route declarations, headers, path/body binding, response models, and empty-body enforcement. | Transactions, SQL, revision logic, or lifecycle policy. |
 | Service | Workflow lifecycle, server-owned fields, revision checks, canonical request hashes, idempotency orchestration, and safe persistence-error mapping. | HTTP response formatting or raw SQL. |
 | Database | Connection-pool lifecycle and transaction context. | Domain decisions or query contents. |
-| Repository | Parameterized SQL, row locking, canonical document/summary writes, and idempotency-record reads and writes. | HTTP semantics or workflow lifecycle decisions. |
+| Repository | Parameterized SQL, row locking, metadata/summary/pointer writes, legacy JSONB reads, and idempotency records. | HTTP semantics, object I/O, or workflow lifecycle decisions. |
+| Document store | Deterministic serialization, immutable object keys, bounded validated reads, and S3 error mapping. | SQL, revisions, idempotency, or public URLs. |
 | Models | Strict canonical schemas, discriminated step/parameter variants, validators, summaries, and stable request hashing. | I/O and transaction management. |
 
 ## Runtime flows
@@ -203,8 +210,9 @@ batch/run metadata disappear on restart. The Inngest path does not request captu
 
 ### Read requests
 
-- `GET /v1/workflows/{workflowId}` opens a transaction and selects the canonical
-  `document` JSONB value for one workflow.
+- `GET /v1/workflows/{workflowId}` selects the active opaque object key, closes the
+  transaction, then reads and validates the canonical object. Rows not yet backfilled
+  temporarily fall back to legacy `document` JSONB.
 - `GET /v1/workflows` selects only the precomputed `summary` JSONB values, ordered by
   relational `updated_at DESC`. The query never loads full workflow documents, which
   makes the list endpoint privacy-safe by construction.
@@ -222,14 +230,16 @@ Every mutation executes inside one PostgreSQL transaction:
    revision.
 5. The service replaces client-supplied server-owned fields, increments the revision
    once, validates the resulting canonical model, and derives a safe summary.
-6. The repository writes the canonical document and summary together, then records the
-   successful response against the idempotency key.
+6. The document store writes immutable deterministic JSON. The repository publishes its
+   opaque key with the safe summary and records the successful idempotency response.
 7. The transaction commits all changes together. Any failure rolls back both the
    workflow change and the claimed key, so failed mutations do not consume keys.
 
-The row lock serializes competing writes. The conditional `UPDATE ... WHERE revision =
-expected_revision` adds a compare-and-swap guard; exactly one concurrent writer can
-advance a given revision.
+The row lock serializes competing writes. Bucket I/O remains inside the mutation
+transaction after replay and revision checks. The conditional `UPDATE ... WHERE revision
+= expected_revision` adds a compare-and-swap guard; exactly one concurrent writer can
+publish a new pointer and advance a revision. A later database rollback can leave only an
+unreachable immutable object.
 
 ### Validation and error flow
 
@@ -251,12 +261,14 @@ migrations.
 | --- | --- |
 | `id`, `revision`, `status` | Identity, optimistic concurrency, and lifecycle fields used by SQL. |
 | `created_at`, `updated_at`, `finished_at` | Server-owned lifecycle timestamps and list ordering. |
-| `document` JSONB | Complete canonical workflow returned by the detail endpoint. |
+| `document_key` | Opaque key for the active immutable canonical object. |
+| `document` JSONB | Nullable legacy source retained only during the staged backfill. |
 | `summary` JSONB | Precomputed safe projection returned by list operations. |
 
 The relational columns duplicate selected document fields intentionally so the database
-can lock, compare, constrain, and order records without querying arbitrary JSON. The
-document and summary must always be written in the same transaction.
+can lock, compare, constrain, and order records without reading arbitrary objects. The
+document pointer, metadata, summary, and idempotency result are published in one database
+transaction after the immutable object write succeeds.
 
 ### `idempotency_records`
 
@@ -292,7 +304,9 @@ relay_backend/
 │       ├── 0005-stateless-browserbase-run-service.md
 │       ├── 0006-schema-1.3-assertion-execution.md
 │       ├── 0007-in-memory-background-batches.md
-│       └── 0008-unauthenticated-local-execution-service.md
+│       ├── 0008-unauthenticated-local-execution-service.md
+│       ├── 0009-local-terminal-screenshot-artifacts.md
+│       └── 0010-railway-workflow-document-storage.md
 ├── packages/
 │   ├── automation-core/
 │   │   ├── package.json               Private ESM package metadata and scripts
@@ -317,12 +331,16 @@ relay_backend/
 │   ├── env.py                        Alembic online/offline runtime configuration
 │   ├── script.py.mako                Migration revision template
 │   └── versions/
-│       └── 0001_initial.py            Workflow and idempotency table definitions
+│       ├── 0001_initial.py            Workflow and idempotency table definitions
+│       ├── 0002_add_namespace_and_record.py  Pre-existing namespace/record schema
+│       └── 0003_add_workflow_document_key.py Object-key staged migration
 ├── src/
 │   └── relay_backend/
 │       ├── __init__.py                Package marker
 │       ├── main.py                    App factory, lifespan, middleware, error mapping
 │       ├── settings.py                Required environment-backed configuration
+│       ├── document_store.py          Railway S3 object serialization and transport
+│       ├── backfill_workflow_documents.py  Resumable legacy JSONB backfill command
 │       ├── auth.py                    Shared Basic authentication dependency
 │       ├── request_limits.py          ASGI request-body size enforcement
 │       ├── contract.py                Repository/installed OpenAPI contract loader
@@ -339,6 +357,8 @@ relay_backend/
 └── tests/
     ├── conftest.py                    Migration and database-cleanup fixtures
     ├── test_api.py                    HTTP, auth, errors, limits, and served contract
+    ├── test_backfill.py               Resumable legacy-document migration behavior
+    ├── test_document_store.py         S3 serialization, bounds, and safe failures
     ├── test_service.py                Transactions, concurrency, privacy, idempotency
     └── test_models.py                 Validation, variants, summaries, schema agreement
 ```
@@ -351,7 +371,9 @@ are package markers and contain no runtime behavior.
 | Path | Responsibility |
 | --- | --- |
 | [`src/relay_backend/main.py`](src/relay_backend/main.py) | Builds the app, owns dependency lifetime, installs middleware/routes, serves the contract, and maps failures to safe API errors. |
-| [`src/relay_backend/settings.py`](src/relay_backend/settings.py) | Declares required database and shared-auth environment settings. |
+| [`src/relay_backend/settings.py`](src/relay_backend/settings.py) | Declares required database, shared-auth, and private bucket environment settings. |
+| [`src/relay_backend/document_store.py`](src/relay_backend/document_store.py) | Defines the constructor-injected document-store protocol and bounded S3 adapter. |
+| [`src/relay_backend/backfill_workflow_documents.py`](src/relay_backend/backfill_workflow_documents.py) | Moves legacy JSONB documents to immutable objects without changing workflow metadata. |
 | [`src/relay_backend/auth.py`](src/relay_backend/auth.py) | Validates shared credentials with constant-time byte comparisons. |
 | [`src/relay_backend/request_limits.py`](src/relay_backend/request_limits.py) | Enforces the 1 MiB request-body limit for declared and streamed body sizes. |
 | [`src/relay_backend/contract.py`](src/relay_backend/contract.py) | Selects and parses the repository or packaged OpenAPI document. |
@@ -359,7 +381,7 @@ are package markers and contain no runtime behavior.
 | [`src/relay_backend/controllers/workflows.py`](src/relay_backend/controllers/workflows.py) | Maps the five workflow operations to service calls. |
 | [`src/relay_backend/services/workflows.py`](src/relay_backend/services/workflows.py) | Implements create/save/finish lifecycle behavior, revisions, hashes, and transaction error mapping. |
 | [`src/relay_backend/data/database.py`](src/relay_backend/data/database.py) | Owns the Psycopg pool and transaction context manager. |
-| [`src/relay_backend/data/workflow_repository.py`](src/relay_backend/data/workflow_repository.py) | Executes workflow, summary, lock, and idempotency SQL. |
+| [`src/relay_backend/data/workflow_repository.py`](src/relay_backend/data/workflow_repository.py) | Executes metadata, summary, object-pointer, legacy-backfill, lock, and idempotency SQL. |
 | [`src/relay_backend/models/workflows.py`](src/relay_backend/models/workflows.py) | Defines strict camelCase API models, workflow-step variants, safe summaries, and canonical hashing. |
 | [`migrations/`](migrations/) | Configures Alembic and stores ordered, reversible database changes. |
 | [`tests/test_models.py`](tests/test_models.py) | Proves strict model behavior and OpenAPI schema compatibility. |
@@ -392,6 +414,7 @@ are package markers and contain no runtime behavior.
 | Change lifecycle or revision behavior | [`services/workflows.py`](src/relay_backend/services/workflows.py) | OpenAPI mutation semantics and service concurrency tests. |
 | Change idempotency semantics | [`services/workflows.py`](src/relay_backend/services/workflows.py) and [`workflow_repository.py`](src/relay_backend/data/workflow_repository.py) | Schema, contract text, replay/conflict tests, and possibly a new ADR. |
 | Change stored data or indexes | [`migrations/versions/`](migrations/versions/) | Repository SQL, downgrade behavior, tests, and ADR 0001. |
+| Change canonical document storage | [`document_store.py`](src/relay_backend/document_store.py) | Service transactions, settings, migration/backfill behavior, privacy tests, and ADR 0010. |
 | Change list output | `WorkflowSummary` and `to_workflow_summary` in [`models/workflows.py`](src/relay_backend/models/workflows.py) | Repository list query, OpenAPI schemas, and privacy assertions. |
 | Change authentication | [`auth.py`](src/relay_backend/auth.py) | Settings, OpenAPI security, API tests, and ADR 0002. |
 | Change error behavior | [`errors.py`](src/relay_backend/errors.py) and [`main.py`](src/relay_backend/main.py) | OpenAPI responses and safe-error tests. |
@@ -416,10 +439,13 @@ are package markers and contain no runtime behavior.
 - Idempotency keys are global. Exact replays return the original result; changed
   requests return `409 idempotency_conflict`.
 - Failed mutations do not consume an idempotency key.
-- Canonical documents and safe summaries are updated together in one transaction.
+- Immutable canonical objects are written before their pointer, safe summary, revision,
+  and idempotency result are published in one PostgreSQL transaction. Rolled-back writes
+  may leave only unreachable objects.
 - List queries never load or expose workflow payloads, targets, parameter values, or
   source session IDs.
-- Errors and logs never include workflow bodies, credentials, or persistence details.
+- Errors and logs never include workflow bodies, credentials, object keys, or other
+  persistence details.
 - Runtime SQL remains parameterized.
 - Request bodies larger than 1 MiB are rejected whether or not `Content-Length` is
   present or valid.
@@ -449,8 +475,9 @@ are package markers and contain no runtime behavior.
 ## Configuration, packaging, and local dependencies
 
 - [`Settings`](src/relay_backend/settings.py) requires `DATABASE_URL`,
-  `BASIC_AUTH_USERNAME`, and `BASIC_AUTH_PASSWORD`. Tests optionally use
-  `TEST_DATABASE_URL` directly from their fixture configuration.
+  `BASIC_AUTH_USERNAME`, `BASIC_AUTH_PASSWORD`, `BUCKET`, `ENDPOINT`, `ACCESS_KEY_ID`,
+  `SECRET_ACCESS_KEY`, and `REGION`. Tests constructor-inject an in-memory document store
+  and optionally use `TEST_DATABASE_URL` directly from fixture configuration.
 - The Browserbase worker reads `BROWSERBASE_API_KEY` for real runs and optionally
   `BROWSERBASE_PROJECT_ID`, `BROWSERBASE_REGION`, `BROWSERBASE_USE_PROXY`, and
   `BROWSERBASE_VERIFIED`. Validation-only CLI use does not require credentials.
@@ -560,6 +587,8 @@ agree with the code.
 - [`ADR 0006: Require schema 1.3 for background execution`](docs/decisions/0006-schema-1.3-assertion-execution.md)
 - [`ADR 0007: Add in-memory background batches`](docs/decisions/0007-in-memory-background-batches.md)
 - [`ADR 0008: Unauthenticated local execution service`](docs/decisions/0008-unauthenticated-local-execution-service.md)
+- [`ADR 0009: Local terminal screenshot artifacts`](docs/decisions/0009-local-terminal-screenshot-artifacts.md)
+- [`ADR 0010: Railway workflow document storage`](docs/decisions/0010-railway-workflow-document-storage.md)
 
 When a decision changes, add a new sequential record that supersedes the older one.
 Preserve accepted historical records rather than rewriting or deleting their rationale.

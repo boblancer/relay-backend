@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-010
 
 ## Date
 
@@ -51,4 +51,3 @@ explicit compare-and-swap transactions. Rejected in favor of short parameterized
 - Workflow schema changes generally do not require relational migrations.
 - The document and summary are duplicated and must always be updated in one transaction.
 - List operations are privacy-safe by construction and do not load full documents.
-
