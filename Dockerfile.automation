@@ -1,0 +1,34 @@
+FROM node:24-slim
+
+WORKDIR /app
+
+# Copy all three packages and their lockfiles
+COPY packages/automation-core/package.json packages/automation-core/
+COPY packages/automation-core/package-lock.json packages/automation-core/
+COPY packages/automation-worker-browserbase/package.json packages/automation-worker-browserbase/
+COPY packages/automation-worker-browserbase/package-lock.json packages/automation-worker-browserbase/
+COPY packages/automation-service-browserbase/package.json packages/automation-service-browserbase/
+COPY packages/automation-service-browserbase/package-lock.json packages/automation-service-browserbase/
+
+# Install dependencies for each package
+RUN cd packages/automation-core && npm install \
+ && cd ../automation-worker-browserbase && npm install \
+ && cd ../automation-service-browserbase && npm install
+
+# Copy source and build in dependency order
+COPY packages/automation-core/ packages/automation-core/
+RUN cd packages/automation-core && npm run build
+
+COPY packages/automation-worker-browserbase/ packages/automation-worker-browserbase/
+RUN cd packages/automation-worker-browserbase && npm run build
+
+COPY packages/automation-service-browserbase/ packages/automation-service-browserbase/
+RUN cd packages/automation-service-browserbase && npm run build
+
+ENV PORT=8080
+ENV AUTOMATION_HOST=0.0.0.0
+ENV AUTOMATION_SCREENSHOTS=false
+
+EXPOSE 8080
+
+CMD ["node", "packages/automation-service-browserbase/dist/main.js"]

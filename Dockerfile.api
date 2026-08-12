@@ -1,0 +1,21 @@
+FROM python:3.12-slim AS base
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md openapi.yaml ./
+COPY packages/automation-service-browserbase/openapi.yaml packages/automation-service-browserbase/openapi.yaml
+COPY src/ src/
+RUN uv sync --frozen --no-dev
+
+COPY alembic.ini ./
+COPY migrations/ migrations/
+COPY scripts/start-api.sh scripts/start-api.sh
+RUN chmod +x scripts/start-api.sh
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+EXPOSE 8000
+
+ENTRYPOINT ["scripts/start-api.sh"]
