@@ -4,6 +4,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import boto3
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -11,28 +12,48 @@ from scalar_fastapi import AgentScalarConfig, OpenAPISource, get_scalar_api_refe
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from relay_backend.contract import load_automation_openapi_contract, load_openapi_contract
+from relay_backend.controllers.namespaces import router as namespace_router
 from relay_backend.controllers.workflows import router as workflow_router
 from relay_backend.data.database import Database
+from relay_backend.data.idempotency_repository import IdempotencyRepository
+from relay_backend.data.namespace_repository import NamespaceRepository
+from relay_backend.document_store import S3WorkflowDocumentStore
 from relay_backend.errors import (
     AuthenticationError,
     IdempotencyConflictError,
+    NamespaceConflictError,
+    NamespaceNotFoundError,
     PersistenceUnavailableError,
     RevisionConflictError,
+    ScopedWorkflowNotFoundError,
     ValidationFailedError,
     WorkflowError,
     WorkflowNotFoundError,
 )
 from relay_backend.request_limits import RequestBodyLimitMiddleware
+from relay_backend.services.namespaces import NamespaceService
 from relay_backend.services.workflows import WorkflowService
 from relay_backend.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 
+def _create_document_store(settings: Settings) -> S3WorkflowDocumentStore:
+    client = boto3.client(
+        "s3",
+        endpoint_url=settings.endpoint,
+        aws_access_key_id=settings.access_key_id.get_secret_value(),
+        aws_secret_access_key=settings.secret_access_key.get_secret_value(),
+        region_name=settings.region,
+    )
+    return S3WorkflowDocumentStore(client, bucket=settings.bucket)
+
+
 def create_app(
     *,
     settings: Settings | None = None,
     service: WorkflowService | None = None,
+    namespace_service: NamespaceService | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -40,12 +61,28 @@ def create_app(
         app.state.settings = runtime_settings
         if service is not None:
             app.state.workflow_service = service
+            app.state.namespace_service = namespace_service
+            if app.state.namespace_service is None and hasattr(service, "database"):
+                app.state.namespace_service = NamespaceService(service.database)
             yield
             return
 
         database = Database(runtime_settings.database_url)
         database.open()
-        app.state.workflow_service = WorkflowService(database)
+        document_store = _create_document_store(runtime_settings)
+        namespace_repository = NamespaceRepository()
+        idempotency_repository = IdempotencyRepository()
+        app.state.workflow_service = WorkflowService(
+            database,
+            document_store,
+            namespace_repository=namespace_repository,
+            idempotency_repository=idempotency_repository,
+        )
+        app.state.namespace_service = NamespaceService(
+            database,
+            repository=namespace_repository,
+            idempotency_repository=idempotency_repository,
+        )
         try:
             yield
         finally:
@@ -87,6 +124,7 @@ def create_app(
         )
 
     app.add_middleware(RequestBodyLimitMiddleware)
+    app.include_router(namespace_router)
     app.include_router(workflow_router)
     _install_error_handlers(app)
     return app
@@ -117,8 +155,14 @@ def _install_error_handlers(app: FastAPI) -> None:
         request: Request,
         error: RequestValidationError,
     ) -> JSONResponse:
-        del request, error
-        return _error_response(400, "validation_failed", "The workflow request is invalid.")
+        del error
+        message = (
+            "The namespace request is invalid."
+            if request.url.path.startswith("/v1/namespaces")
+            and "/workflows" not in request.url.path
+            else "The workflow request is invalid."
+        )
+        return _error_response(400, "validation_failed", message)
 
     @app.exception_handler(WorkflowError)
     async def workflow_error(request: Request, error: WorkflowError) -> JSONResponse:
@@ -134,10 +178,14 @@ def _install_error_handlers(app: FastAPI) -> None:
             return _error_response(400, "validation_failed", str(error))
         if isinstance(error, WorkflowNotFoundError):
             return _error_response(404, "not_found", str(error))
+        if isinstance(error, (NamespaceNotFoundError, ScopedWorkflowNotFoundError)):
+            return _error_response(404, "not_found", str(error))
         if isinstance(error, RevisionConflictError):
             return _error_response(409, "revision_conflict", str(error))
         if isinstance(error, IdempotencyConflictError):
             return _error_response(409, "idempotency_conflict", str(error))
+        if isinstance(error, NamespaceConflictError):
+            return _error_response(409, "namespace_conflict", str(error))
         if isinstance(error, PersistenceUnavailableError):
             return _error_response(503, "unavailable", str(error))
         return _error_response(500, "internal", "The workflow storage operation failed.")

@@ -1,7 +1,8 @@
 # Relay Backend agent guide
 
 Relay Backend is a Python 3.12 FastAPI proof of concept that persists Browser Memory
-Recorder workflow documents in PostgreSQL, with separate TypeScript packages for
+Recorder workflow documents in a private S3-compatible bucket and their metadata in
+PostgreSQL, with separate TypeScript packages for
 Browserbase execution and unauthenticated loopback streaming/in-memory batch HTTP transport. Before
 changing the repository, read
 [`NAVIGATION.md`](NAVIGATION.md); it is the canonical architecture, ownership, and file
@@ -28,7 +29,11 @@ setup step, or file location changes.
 - Increment revisions exactly once for successful new mutations.
 - Keep idempotency keys global: exact replays return the original result, conflicting
   reuse returns `409`, and failed mutations do not consume keys.
-- Keep canonical documents and privacy-safe summaries synchronized in one transaction.
+- Keep every workflow owned by one namespace. Nested access must constrain both UUIDs
+  and return the same safe `404` for missing or cross-namespace resources.
+- Publish immutable canonical documents before atomically updating their PostgreSQL
+  pointer, privacy-safe summary, revision, and idempotency result. A rolled-back
+  mutation may leave only an unreachable object.
 - Never expose or log workflow bodies, credentials, step payloads, targets, parameter
   values, source session IDs, or persistence details.
 - Keep run-service request/header logging disabled; keep its default bind address on

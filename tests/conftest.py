@@ -32,4 +32,5 @@ def clean_database(migrated_database: None) -> Iterator[None]:
     del migrated_database
     with psycopg.connect(DATABASE_URL) as connection:
         connection.execute("TRUNCATE idempotency_records, workflows")
+        connection.execute("DELETE FROM namespaces WHERE name <> 'Default'")
     yield

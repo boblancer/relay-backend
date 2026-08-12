@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Browser Memory Recorder Cloud Workflow API
-  version: 1.0.0
+  version: 1.1.0
   summary: Cloud persistence contract for canonical browser workflows.
   description: |
     This contract is the handoff boundary between Browser Memory Recorder's
@@ -17,6 +17,8 @@ info:
     so list responses and errors must never include step payloads or targets.
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 tags:
+  - name: Namespaces
+    description: Organizational workflow containers.
   - name: Workflows
     description: Canonical workflow persistence.
 x-contract-semantics:
@@ -24,6 +26,11 @@ x-contract-semantics:
   maximumRequestBytes: 1048576
   listOrdering: updatedAt descending
   authentication: Shared HTTP Basic credentials.
+  defaultNamespaceName: Default
+  namespaceRules:
+    - Namespaces organize workflows but are not authentication or tenant boundaries.
+    - Namespace names are trimmed and use exact case-sensitive uniqueness.
+    - Missing namespaces and cross-namespace workflow access use the same safe response.
   mutationRules:
     - Compare expectedRevision and apply the mutation in one atomic operation.
     - Increment revision exactly once for a successful new mutation.
@@ -38,14 +45,266 @@ security:
   - basicAuth: []
 
 paths:
-  /v1/workflows:
+  /v1/namespaces:
+    get:
+      operationId: listNamespaces
+      tags:
+        - Namespaces
+      summary: List namespaces
+      description: Returns namespace metadata ordered by name, then UUID.
+      responses:
+        "200":
+          description: Namespace metadata ordered by name, then UUID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NamespaceListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+    post:
+      operationId: createNamespace
+      tags:
+        - Namespaces
+      summary: Create a namespace
+      description: |
+        Creates a namespace after trimming its name. Names use exact,
+        case-sensitive uniqueness. An exact idempotency replay returns the
+        original `201` response.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNamespaceRequest"
+      responses:
+        "201":
+          description: Namespace created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Namespace"
+        "400":
+          $ref: "#/components/responses/NamespaceValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/NamespaceMutationConflict"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/namespaces/{namespaceId}:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+
+    get:
+      operationId: getNamespace
+      tags:
+        - Namespaces
+      summary: Get a namespace
+      description: Returns namespace metadata without workflow content.
+      responses:
+        "200":
+          description: Namespace metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Namespace"
+        "400":
+          $ref: "#/components/responses/NamespaceValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NamespaceNotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/namespaces/{namespaceId}/workflows:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+
     get:
       operationId: listWorkflows
       tags:
         - Workflows
+      summary: List workflow summaries in a namespace
+      description: |
+        Returns workflow summaries in the namespace ordered by `updatedAt`
+        descending. The list reads only privacy-safe summaries.
+      responses:
+        "200":
+          description: Workflow summaries ordered from most recently updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowListResponse"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/ScopedWorkflowNotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+    post:
+      operationId: createWorkflow
+      tags:
+        - Workflows
+      summary: Create a workflow draft in a namespace
+      description: |
+        Creates a canonical empty workflow draft owned by the namespace.
+        Namespace metadata is not added to the canonical workflow document.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Canonical workflow draft created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/ScopedWorkflowNotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/namespaces/{namespaceId}/workflows/{workflowId}:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+      - $ref: "#/components/parameters/WorkflowId"
+
+    get:
+      operationId: getWorkflow
+      tags:
+        - Workflows
+      summary: Load a canonical workflow from a namespace
+      description: Returns the complete canonical workflow only when owned by the namespace.
+      responses:
+        "200":
+          description: Complete canonical workflow.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/ScopedWorkflowNotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+    put:
+      operationId: saveWorkflow
+      tags:
+        - Workflows
+      summary: Save a workflow snapshot in a namespace
+      description: |
+        Atomically saves an edited workflow owned by the namespace when
+        `expectedRevision` equals the stored revision. Exact replays return the
+        original response before revision evaluation.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/SaveWorkflowRequest"
+      responses:
+        "200":
+          description: Canonical saved workflow with its new revision.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/ScopedWorkflowNotFound"
+        "409":
+          $ref: "#/components/responses/MutationConflict"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/namespaces/{namespaceId}/workflows/{workflowId}/finish:
+    parameters:
+      - $ref: "#/components/parameters/NamespaceId"
+      - $ref: "#/components/parameters/WorkflowId"
+
+    post:
+      operationId: finishWorkflow
+      tags:
+        - Workflows
+      summary: Finish a workflow in a namespace
+      description: |
+        Atomically saves and completes a workflow owned by the namespace when
+        `expectedRevision` equals the stored revision. Exact replays return the
+        original response before revision evaluation.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/SaveWorkflowRequest"
+      responses:
+        "200":
+          description: Canonical completed workflow with its new revision.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/ScopedWorkflowNotFound"
+        "409":
+          $ref: "#/components/responses/MutationConflict"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /v1/workflows:
+    get:
+      operationId: legacyListWorkflow
+      deprecated: true
+      tags:
+        - Workflows
       summary: List workflow summaries
       description: |
-        Returns all workflow summaries ordered by `updatedAt` descending.
+        Deprecated compatibility alias. Returns workflow summaries across all
+        namespaces ordered by `updatedAt` descending.
         Version 1 is intentionally unpaginated.
 
         A summary contains only workflow identity and lifecycle metadata plus
@@ -66,12 +325,14 @@ paths:
           $ref: "#/components/responses/Internal"
 
     post:
-      operationId: createWorkflow
+      operationId: legacyCreateWorkflow
+      deprecated: true
       tags:
         - Workflows
       summary: Create a workflow draft
       description: |
-        Creates a canonical empty workflow draft.
+        Deprecated compatibility alias. Creates a canonical empty workflow
+        draft in the exact-case `Default` namespace.
 
         The backend generates the UUID and timestamps and returns:
 
@@ -110,11 +371,12 @@ paths:
       - $ref: "#/components/parameters/WorkflowId"
 
     get:
-      operationId: getWorkflow
+      operationId: legacyGetWorkflow
+      deprecated: true
       tags:
         - Workflows
       summary: Load a canonical workflow
-      description: Returns the complete canonical workflow document.
+      description: Deprecated global workflow-ID compatibility alias.
       responses:
         "200":
           description: Complete canonical workflow.
@@ -134,13 +396,14 @@ paths:
           $ref: "#/components/responses/Internal"
 
     put:
-      operationId: saveWorkflow
+      operationId: legacySaveWorkflow
+      deprecated: true
       tags:
         - Workflows
       summary: Save a workflow snapshot
       description: |
-        Atomically saves an edited workflow when `expectedRevision` equals the
-        current stored revision.
+        Deprecated global workflow-ID compatibility alias. Atomically saves an
+        edited workflow when `expectedRevision` equals the current stored revision.
 
         The route `workflowId` must equal `workflow.id`. The backend preserves
         the stored workflow's ID, creation time, lifecycle status, and finish
@@ -182,13 +445,15 @@ paths:
       - $ref: "#/components/parameters/WorkflowId"
 
     post:
-      operationId: finishWorkflow
+      operationId: legacyFinishWorkflow
+      deprecated: true
       tags:
         - Workflows
       summary: Finish a workflow
       description: |
-        Atomically saves the supplied workflow and marks it complete when
-        `expectedRevision` equals the current stored revision.
+        Deprecated global workflow-ID compatibility alias. Atomically saves the
+        supplied workflow and marks it complete when `expectedRevision` equals
+        the current stored revision.
 
         A workflow must contain at least one step. The route `workflowId` must
         equal `workflow.id`. The backend preserves `createdAt`, increments the
@@ -232,6 +497,15 @@ components:
       description: Shared credentials configured by the backend operator.
 
   parameters:
+    NamespaceId:
+      name: namespaceId
+      in: path
+      required: true
+      description: Server-generated namespace UUID.
+      schema:
+        type: string
+        format: uuid
+
     WorkflowId:
       name: workflowId
       in: path
@@ -251,7 +525,8 @@ components:
         Keys are global across workflow mutation endpoints. Reusing a key with
         the same method, path, and canonical request content returns the
         original status and body. Reusing it for different content returns
-        `409 idempotency_conflict`.
+        `409 idempotency_conflict`. Flat and namespace-scoped route paths are
+        distinct identities even when they address the same workflow.
       schema:
         type: string
         format: uuid
@@ -299,6 +574,45 @@ components:
                   code: validation_failed
                   message: The workflow request is invalid.
 
+    NamespaceValidationFailed:
+      description: The namespace path or request body is invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            validation:
+              value:
+                error:
+                  code: validation_failed
+                  message: The namespace request is invalid.
+
+    NamespaceNotFound:
+      description: The namespace does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            missing:
+              value:
+                error:
+                  code: not_found
+                  message: The namespace was not found.
+
+    ScopedWorkflowNotFound:
+      description: The namespace or an owned workflow does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            missing:
+              value:
+                error:
+                  code: not_found
+                  message: The namespace or workflow was not found.
+
     NotFound:
       description: The workflow does not exist.
       content:
@@ -339,6 +653,24 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
           examples:
+            idempotency:
+              value:
+                error:
+                  code: idempotency_conflict
+                  message: The idempotency key was already used for another request.
+
+    NamespaceMutationConflict:
+      description: The name exists or the idempotency key belongs to another request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            name:
+              value:
+                error:
+                  code: namespace_conflict
+                  message: A namespace with that name already exists.
             idempotency:
               value:
                 error:
@@ -393,6 +725,7 @@ components:
         - not_found
         - revision_conflict
         - idempotency_conflict
+        - namespace_conflict
         - unavailable
         - internal
 
@@ -415,6 +748,53 @@ components:
               type: string
               minLength: 1
               description: Safe message that contains no workflow or storage details.
+
+    CreateNamespaceRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Namespace name, trimmed before validation and storage.
+
+    Namespace:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    NamespaceListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - namespaces
+      properties:
+        namespaces:
+          type: array
+          description: Namespace metadata ordered by name, then UUID.
+          items:
+            $ref: "#/components/schemas/Namespace"
 
     WorkflowListResponse:
       type: object
