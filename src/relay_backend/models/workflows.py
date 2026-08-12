@@ -37,6 +37,7 @@ class ErrorCode(StrEnum):
     NOT_FOUND = "not_found"
     REVISION_CONFLICT = "revision_conflict"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    NAMESPACE_CONFLICT = "namespace_conflict"
     UNAVAILABLE = "unavailable"
     INTERNAL = "internal"
 
@@ -361,7 +362,7 @@ def to_workflow_summary(workflow: Workflow) -> WorkflowSummary:
 def canonical_request_hash(
     method: str,
     path: str,
-    request: SaveWorkflowRequest | None = None,
+    request: ApiModel | None = None,
 ) -> bytes:
     request_json = ""
     if request is not None:

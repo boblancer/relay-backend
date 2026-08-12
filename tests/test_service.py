@@ -277,12 +277,15 @@ def test_legacy_jsonb_document_remains_readable(
     workflow = Workflow.model_validate(workflow_document())
     summary = to_workflow_summary(workflow)
     with psycopg.connect(DATABASE_URL) as connection:
+        namespace_id = connection.execute(
+            "SELECT id FROM namespaces WHERE name = 'Default'"
+        ).fetchone()[0]
         connection.execute(
             """
             INSERT INTO workflows (
                 id, revision, status, created_at, updated_at, finished_at,
-                document, document_key, summary
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s)
+                document, document_key, summary, namespace_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s, %s)
             """,
             (
                 workflow.id,
@@ -293,6 +296,7 @@ def test_legacy_jsonb_document_remains_readable(
                 workflow.finished_at,
                 Jsonb(workflow.model_dump(mode="json", by_alias=True, exclude_none=True)),
                 Jsonb(summary.model_dump(mode="json", by_alias=True, exclude_none=True)),
+                namespace_id,
             ),
         )
 

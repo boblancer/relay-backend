@@ -29,6 +29,8 @@ setup step, or file location changes.
 - Increment revisions exactly once for successful new mutations.
 - Keep idempotency keys global: exact replays return the original result, conflicting
   reuse returns `409`, and failed mutations do not consume keys.
+- Keep every workflow owned by one namespace. Nested access must constrain both UUIDs
+  and return the same safe `404` for missing or cross-namespace resources.
 - Publish immutable canonical documents before atomically updating their PostgreSQL
   pointer, privacy-safe summary, revision, and idempotency result. A rolled-back
   mutation may leave only an unreachable object.

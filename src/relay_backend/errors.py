@@ -20,6 +20,21 @@ class WorkflowNotFoundError(WorkflowError):
         super().__init__("The workflow was not found.")
 
 
+class NamespaceNotFoundError(WorkflowError):
+    def __init__(self) -> None:
+        super().__init__("The namespace was not found.")
+
+
+class ScopedWorkflowNotFoundError(WorkflowError):
+    def __init__(self) -> None:
+        super().__init__("The namespace or workflow was not found.")
+
+
+class NamespaceConflictError(WorkflowError):
+    def __init__(self) -> None:
+        super().__init__("A namespace with that name already exists.")
+
+
 class RevisionConflictError(WorkflowError):
     def __init__(self) -> None:
         super().__init__("The workflow changed since it was loaded.")

@@ -1,6 +1,6 @@
 # Namespace-Scoped Workflow Persistence Plan
 
-- Status: Draft for approval
+- Status: Implemented
 - Repository: `relay_backend`
 - Intended delivery: a separate PR after the Railway document-store refactor
 - Contract owner: `openapi.yaml`
@@ -69,19 +69,26 @@ The current flat `/v1/workflows` routes remain in `openapi.yaml` with
 so revision and idempotency behavior cannot diverge. Remove these aliases only in a
 later, explicitly breaking contract change.
 
+The nested routes own the existing workflow operation IDs. Deprecated flat aliases use
+distinct `legacy...` operation IDs. Idempotency identity continues using the literal
+method and path, so reuse across nested and flat route shapes conflicts rather than
+replaying.
+
 ## Data Model and Migration
 
 Add sequential migration `0004`; never edit migrations `0001`–`0003`.
 
 1. Reuse the existing `namespaces` table created by `0002`.
-2. Add nullable UUID `workflows.namespace_id` with a foreign key to `namespaces.id`
+2. Refuse migration when existing namespace names are untrimmed, blank, or longer than
+   100 characters, then add a database check for that contract.
+3. Add nullable UUID `workflows.namespace_id` with a foreign key to `namespaces.id`
    using `ON DELETE RESTRICT`.
-3. Reuse an existing namespace named `Default`, or insert it if absent.
-4. Assign every unscoped workflow to `Default` in one SQL migration without touching
+4. Reuse an existing namespace named `Default`, or insert it if absent.
+5. Assign every unscoped workflow to `Default` in one SQL migration without touching
    any other workflow column.
-5. Make `workflows.namespace_id` non-null and add an index beginning with
+6. Make `workflows.namespace_id` non-null and add an index beginning with
    `namespace_id`; retain the existing `updated_at DESC` index.
-6. Leave the unused `records` table from `0002` unchanged. Removing it is a separate
+7. Leave the unused `records` table from `0002` unchanged. Removing it is a separate
    cleanup migration after confirming no external dependency.
 
 Downgrade removes only the workflow namespace foreign key, index, and column. It does
@@ -218,7 +225,7 @@ uv run python -m openapi_spec_validator packages/automation-service-browserbase/
 - List endpoints never load canonical workflow objects.
 - All repository-standard verification commands pass.
 
-## Approval Gate
+## Approval
 
-Implementation must not begin until the assumptions—especially the one-release flat
-route compatibility window and deferred rename/delete/transfer operations—are approved.
+Approved and implemented with a one-release flat-route compatibility window and
+deferred rename/delete/transfer operations.

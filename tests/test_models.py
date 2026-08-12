@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
+from relay_backend.models.namespaces import CreateNamespaceRequest
 from relay_backend.models.workflows import (
     SaveWorkflowRequest,
     Workflow,
@@ -213,6 +214,15 @@ def test_validated_workflow_matches_authoritative_openapi_schema() -> None:
     _assert_matches_contract(workflow)
     assert workflow.id == UUID("b4749f7e-4b22-43bf-8ef4-8ba5f79cb17b")
     assert workflow.created_at == datetime(2026, 7, 30, 12, tzinfo=UTC)
+
+
+def test_namespace_name_is_trimmed_before_length_validation() -> None:
+    assert CreateNamespaceRequest(name="  Acme  ").name == "Acme"
+
+    with pytest.raises(ValidationError):
+        CreateNamespaceRequest(name="   ")
+    with pytest.raises(ValidationError):
+        CreateNamespaceRequest(name=f"  {'a' * 101}  ")
 
 
 def _assert_matches_contract(workflow: Workflow) -> None:

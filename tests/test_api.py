@@ -453,6 +453,7 @@ def test_served_openapi_is_the_authenticated_repository_contract(client: TestCli
     assert response.status_code == 200
     contract = response.json()
     assert contract["openapi"] == "3.1.0"
+    assert contract["info"]["version"] == "1.1.0"
     assert contract["security"] == [{"basicAuth": []}]
     assert contract["components"]["securitySchemes"]["basicAuth"] == {
         "type": "http",
@@ -460,10 +461,86 @@ def test_served_openapi_is_the_authenticated_repository_contract(client: TestCli
         "description": "Shared credentials configured by the backend operator.",
     }
     assert set(contract["paths"]) == {
+        "/v1/namespaces",
+        "/v1/namespaces/{namespaceId}",
+        "/v1/namespaces/{namespaceId}/workflows",
+        "/v1/namespaces/{namespaceId}/workflows/{workflowId}",
+        "/v1/namespaces/{namespaceId}/workflows/{workflowId}/finish",
         "/v1/workflows",
         "/v1/workflows/{workflowId}",
         "/v1/workflows/{workflowId}/finish",
     }
+
+
+def test_openapi_makes_nested_workflows_canonical_and_deprecates_flat_aliases(
+    client: TestClient,
+) -> None:
+    contract = client.get("/openapi.json").json()
+    paths = contract["paths"]
+
+    assert paths["/v1/namespaces"]["get"]["operationId"] == "listNamespaces"
+    assert paths["/v1/namespaces"]["post"]["operationId"] == "createNamespace"
+    assert paths["/v1/namespaces/{namespaceId}"]["get"]["operationId"] == "getNamespace"
+    assert paths["/v1/namespaces/{namespaceId}/workflows"]["get"]["operationId"] == (
+        "listWorkflows"
+    )
+    assert paths["/v1/namespaces/{namespaceId}/workflows"]["post"]["operationId"] == (
+        "createWorkflow"
+    )
+    assert (
+        paths["/v1/namespaces/{namespaceId}/workflows/{workflowId}"]["get"]["operationId"]
+        == "getWorkflow"
+    )
+    assert (
+        paths["/v1/namespaces/{namespaceId}/workflows/{workflowId}"]["put"]["operationId"]
+        == "saveWorkflow"
+    )
+    assert (
+        paths["/v1/namespaces/{namespaceId}/workflows/{workflowId}/finish"]["post"]["operationId"]
+        == "finishWorkflow"
+    )
+
+    legacy_operations = {
+        ("/v1/workflows", "get"): "legacyListWorkflow",
+        ("/v1/workflows", "post"): "legacyCreateWorkflow",
+        ("/v1/workflows/{workflowId}", "get"): "legacyGetWorkflow",
+        ("/v1/workflows/{workflowId}", "put"): "legacySaveWorkflow",
+        ("/v1/workflows/{workflowId}/finish", "post"): "legacyFinishWorkflow",
+    }
+    for (path, method), operation_id in legacy_operations.items():
+        operation = paths[path][method]
+        assert operation["operationId"] == operation_id
+        assert operation["deprecated"] is True
+
+    operation_ids = [
+        operation["operationId"]
+        for path_item in paths.values()
+        for method, operation in path_item.items()
+        if method in {"get", "post", "put", "patch", "delete"}
+    ]
+    assert len(operation_ids) == len(set(operation_ids))
+
+
+def test_openapi_defines_strict_namespace_schemas_and_conflict_code(client: TestClient) -> None:
+    contract = client.get("/openapi.json").json()
+    schemas = contract["components"]["schemas"]
+
+    assert schemas["CreateNamespaceRequest"] == {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["name"],
+        "properties": {
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "description": "Namespace name, trimmed before validation and storage.",
+            }
+        },
+    }
+    assert schemas["Namespace"]["required"] == ["id", "name", "createdAt", "updatedAt"]
+    assert schemas["NamespaceListResponse"]["required"] == ["namespaces"]
+    assert "namespace_conflict" in schemas["ErrorCode"]["enum"]
 
 
 def test_automation_contract_loader_reads_the_run_service_contract() -> None:

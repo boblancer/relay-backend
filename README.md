@@ -5,7 +5,8 @@ workflow documents, plus provider-neutral automation, a Browserbase worker, and 
 private internal execution service with streaming and in-memory batch APIs.
 The FastAPI service implements the repository's `openapi.yaml`, including atomic
 revisions, global idempotency, privacy-safe summaries, and shared HTTP Basic
-authentication. Canonical workflow documents live in a private Railway Storage Bucket;
+authentication. Organizational namespaces own workflows without acting as authorization
+boundaries. Canonical workflow documents live in a private Railway Storage Bucket;
 PostgreSQL stores their active object keys and safe relational metadata. The service does
 not execute workflows.
 
@@ -41,15 +42,30 @@ The run reference documents the separate private Browserbase service; it does no
 owned by the Inngest SDK, not a third Relay API, so use the local Inngest guide and UI
 rather than the API reference for that path.
 
-Create a draft using a fresh UUID for the logical mutation:
+Create a namespace, then create a draft in it using fresh UUIDs for each logical mutation:
 
 ```bash
 curl \
   --user "$BASIC_AUTH_USERNAME:$BASIC_AUTH_PASSWORD" \
   --header "Idempotency-Key: $(python -c 'import uuid; print(uuid.uuid4())')" \
+  --header "Content-Type: application/json" \
+  --data '{"name":"Personal"}' \
   --request POST \
-  http://127.0.0.1:8000/v1/workflows
+  http://127.0.0.1:8000/v1/namespaces
+
+# Copy the returned namespace id.
+NAMESPACE_ID="..."
+
+curl \
+  --user "$BASIC_AUTH_USERNAME:$BASIC_AUTH_PASSWORD" \
+  --header "Idempotency-Key: $(python -c 'import uuid; print(uuid.uuid4())')" \
+  --request POST \
+  "http://127.0.0.1:8000/v1/namespaces/$NAMESPACE_ID/workflows"
 ```
+
+The flat `/v1/workflows` routes remain deprecated compatibility aliases in contract
+version 1.1. Flat creation targets `Default`; flat reads and mutations retain global
+workflow-ID behavior. Their removal is reserved for contract version 2.0.
 
 ## Commands
 
@@ -74,7 +90,8 @@ curl \
 | `npm start --prefix packages/automation-service-browserbase` | Start the execution service |
 
 Tests use `TEST_DATABASE_URL` when set and otherwise use the local Compose database.
-They truncate only the `workflows` and `idempotency_records` tables between cases.
+They truncate workflow and idempotency data and remove non-default test namespaces
+between cases.
 
 To remove the local POC database and all of its workflow data:
 
@@ -199,8 +216,9 @@ screenshot capture, persistent local files, and temporary URL access.
 
 ## POC boundaries
 
-The FastAPI service intentionally excludes user accounts, tenants, pagination,
-deletion, workflow-schema migration, collaboration, replay execution,
+The FastAPI service intentionally excludes user accounts, tenant authorization,
+namespace rename/deletion/transfer, pagination, workflow deletion, workflow-schema
+migration, collaboration, replay execution,
 and application-level encryption. The standalone
 automation library excludes browser lifecycle, queues, service endpoints, persistence,
 retries, recording, and interactive replay controls. The Browserbase worker owns only a

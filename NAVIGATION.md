@@ -14,15 +14,22 @@ validates it against the canonical model, stores the canonical document in a pri
 Railway Storage Bucket, and publishes its metadata and active object key in PostgreSQL.
 
 The persistence boundary is the OpenAPI 3.1 contract in [`openapi.yaml`](openapi.yaml).
-It defines five authenticated operations:
+It defines three namespace operations and five canonical namespace-scoped workflow
+operations:
 
 | Operation | Route | Purpose |
 | --- | --- | --- |
-| `listWorkflows` | `GET /v1/workflows` | Return privacy-safe workflow summaries. |
-| `createWorkflow` | `POST /v1/workflows` | Create an empty server-owned draft. |
-| `getWorkflow` | `GET /v1/workflows/{workflowId}` | Return one complete canonical workflow. |
-| `saveWorkflow` | `PUT /v1/workflows/{workflowId}` | Atomically save a new workflow revision. |
-| `finishWorkflow` | `POST /v1/workflows/{workflowId}/finish` | Save and mark a workflow complete. |
+| `listNamespaces` | `GET /v1/namespaces` | Return namespace metadata. |
+| `createNamespace` | `POST /v1/namespaces` | Create an organizational namespace. |
+| `getNamespace` | `GET /v1/namespaces/{namespaceId}` | Return namespace metadata. |
+| `listWorkflows` | `GET /v1/namespaces/{namespaceId}/workflows` | Return scoped safe summaries. |
+| `createWorkflow` | `POST /v1/namespaces/{namespaceId}/workflows` | Create an owned draft. |
+| `getWorkflow` | `GET /v1/namespaces/{namespaceId}/workflows/{workflowId}` | Return an owned workflow. |
+| `saveWorkflow` | `PUT /v1/namespaces/{namespaceId}/workflows/{workflowId}` | Save an owned revision. |
+| `finishWorkflow` | `POST /v1/namespaces/{namespaceId}/workflows/{workflowId}/finish` | Save and complete an owned workflow. |
+
+The five flat `/v1/workflows` operations remain deprecated global compatibility aliases
+for OpenAPI 1.1. Flat creation uses `Default`; removal is reserved for version 2.0.
 
 The independent execution boundary is
 [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml).
@@ -94,11 +101,11 @@ Browser Memory Recorder / local BFF
           FastAPI auth dependency
                   |
                   v
-        Workflow HTTP controller
+     Namespace/workflow HTTP controllers
                   |
                   v
-           Workflow service
-       lifecycle | revisions | idempotency
+       Namespace/workflow services
+ ownership | lifecycle | revisions | idempotency
           +-------+-------+
           |               |
           v               v
@@ -208,12 +215,16 @@ batch/run metadata disappear on restart. The Inngest path does not request captu
 4. Controllers obtain that service from each incoming request.
 5. On shutdown, the lifespan handler closes the pool.
 
-### Read requests
+### Namespace and read requests
 
-- `GET /v1/workflows/{workflowId}` selects the active opaque object key, closes the
+- Namespace list/get operations select only `id`, `name`, and timestamps. Namespace
+  creation uses the shared global idempotency table and never accesses the bucket.
+- Nested workflow operations constrain both namespace and workflow IDs; missing scope,
+  missing workflow, and ownership mismatch produce one indistinguishable safe `404`.
+- `GET .../workflows/{workflowId}` selects the active opaque object key, closes the
   transaction, then reads and validates the canonical object. Rows not yet backfilled
   temporarily fall back to legacy `document` JSONB.
-- `GET /v1/workflows` selects only the precomputed `summary` JSONB values, ordered by
+- `GET .../workflows` selects only the precomputed `summary` JSONB values, ordered by
   relational `updated_at DESC`. The query never loads full workflow documents, which
   makes the list endpoint privacy-safe by construction.
 
@@ -306,7 +317,8 @@ relay_backend/
 │       ├── 0007-in-memory-background-batches.md
 │       ├── 0008-unauthenticated-local-execution-service.md
 │       ├── 0009-local-terminal-screenshot-artifacts.md
-│       └── 0010-railway-workflow-document-storage.md
+│       ├── 0010-railway-workflow-document-storage.md
+│       └── 0011-namespace-scoped-workflows.md
 ├── packages/
 │   ├── automation-core/
 │   │   ├── package.json               Private ESM package metadata and scripts
@@ -333,7 +345,8 @@ relay_backend/
 │   └── versions/
 │       ├── 0001_initial.py            Workflow and idempotency table definitions
 │       ├── 0002_add_namespace_and_record.py  Pre-existing namespace/record schema
-│       └── 0003_add_workflow_document_key.py Object-key staged migration
+│       ├── 0003_add_workflow_document_key.py Object-key staged migration
+│       └── 0004_scope_workflows_to_namespaces.py Namespace ownership migration
 ├── src/
 │   └── relay_backend/
 │       ├── __init__.py                Package marker
@@ -346,19 +359,27 @@ relay_backend/
 │       ├── contract.py                Repository/installed OpenAPI contract loader
 │       ├── errors.py                  Safe domain and persistence exceptions
 │       ├── controllers/
-│       │   └── workflows.py           Workflow HTTP routes
+│       │   ├── namespaces.py          Namespace and scoped workflow routes
+│       │   └── workflows.py           Deprecated flat workflow routes
 │       ├── services/
-│       │   └── workflows.py           Business rules and transaction orchestration
+│       │   ├── namespaces.py          Namespace metadata behavior
+│       │   └── workflows.py           Scoped and legacy workflow orchestration
 │       ├── data/
 │       │   ├── database.py            Psycopg connection pool and transactions
-│       │   └── workflow_repository.py Parameterized SQL and row locking
+│       │   ├── idempotency_repository.py Shared global mutation identities
+│       │   ├── namespace_repository.py Namespace metadata and scope checks
+│       │   └── workflow_repository.py Scoped/global SQL and row locking
 │       └── models/
+│           ├── namespaces.py          Strict namespace API models
 │           └── workflows.py           Canonical Pydantic workflow model family
 └── tests/
     ├── conftest.py                    Migration and database-cleanup fixtures
     ├── test_api.py                    HTTP, auth, errors, limits, and served contract
     ├── test_backfill.py               Resumable legacy-document migration behavior
     ├── test_document_store.py         S3 serialization, bounds, and safe failures
+    ├── test_namespace_api.py          Namespace and scoped workflow HTTP behavior
+    ├── test_namespace_migration.py    Ownership migration and invalid-name guard
+    ├── test_namespace_service.py      Namespace concurrency behavior
     ├── test_service.py                Transactions, concurrency, privacy, idempotency
     └── test_models.py                 Validation, variants, summaries, schema agreement
 ```
@@ -378,16 +399,20 @@ are package markers and contain no runtime behavior.
 | [`src/relay_backend/request_limits.py`](src/relay_backend/request_limits.py) | Enforces the 1 MiB request-body limit for declared and streamed body sizes. |
 | [`src/relay_backend/contract.py`](src/relay_backend/contract.py) | Selects and parses the repository or packaged OpenAPI document. |
 | [`src/relay_backend/errors.py`](src/relay_backend/errors.py) | Defines failures whose messages are safe at the HTTP boundary. |
-| [`src/relay_backend/controllers/workflows.py`](src/relay_backend/controllers/workflows.py) | Maps the five workflow operations to service calls. |
-| [`src/relay_backend/services/workflows.py`](src/relay_backend/services/workflows.py) | Implements create/save/finish lifecycle behavior, revisions, hashes, and transaction error mapping. |
+| [`src/relay_backend/controllers/namespaces.py`](src/relay_backend/controllers/namespaces.py) | Maps namespace and canonical scoped workflow operations to services. |
+| [`src/relay_backend/controllers/workflows.py`](src/relay_backend/controllers/workflows.py) | Maps deprecated flat workflow aliases to shared service behavior. |
+| [`src/relay_backend/services/namespaces.py`](src/relay_backend/services/namespaces.py) | Implements namespace metadata, ordering, idempotency, and safe conflicts. |
+| [`src/relay_backend/services/workflows.py`](src/relay_backend/services/workflows.py) | Implements scoped and legacy lifecycle behavior with shared revision orchestration. |
 | [`src/relay_backend/data/database.py`](src/relay_backend/data/database.py) | Owns the Psycopg pool and transaction context manager. |
-| [`src/relay_backend/data/workflow_repository.py`](src/relay_backend/data/workflow_repository.py) | Executes metadata, summary, object-pointer, legacy-backfill, lock, and idempotency SQL. |
+| [`src/relay_backend/data/idempotency_repository.py`](src/relay_backend/data/idempotency_repository.py) | Claims and completes global idempotency records for every mutation. |
+| [`src/relay_backend/data/namespace_repository.py`](src/relay_backend/data/namespace_repository.py) | Executes namespace metadata, default resolution, and scope-check SQL. |
+| [`src/relay_backend/data/workflow_repository.py`](src/relay_backend/data/workflow_repository.py) | Executes scoped/global metadata, summary, object-pointer, backfill, and lock SQL. |
 | [`src/relay_backend/models/workflows.py`](src/relay_backend/models/workflows.py) | Defines strict camelCase API models, workflow-step variants, safe summaries, and canonical hashing. |
 | [`migrations/`](migrations/) | Configures Alembic and stores ordered, reversible database changes. |
 | [`tests/test_models.py`](tests/test_models.py) | Proves strict model behavior and OpenAPI schema compatibility. |
 | [`tests/test_service.py`](tests/test_service.py) | Proves lifecycle, transaction, concurrency, privacy, ordering, and idempotency behavior against PostgreSQL. |
 | [`tests/test_api.py`](tests/test_api.py) | Proves authentication, routes, errors, limits, and served-contract behavior. |
-| [`tests/conftest.py`](tests/conftest.py) | Applies migrations once and truncates only the two application tables between tests. |
+| [`tests/conftest.py`](tests/conftest.py) | Applies migrations once and cleans workflow, idempotency, and non-default namespace test data. |
 | [`docs/decisions/`](docs/decisions/) | Preserves the rationale and consequences of accepted architecture/security decisions. |
 | [`packages/automation-core/src/workflow.ts`](packages/automation-core/src/workflow.ts) | Defines the strict TypeScript schema 1.3 execution contract, assertions, and locator ordering. |
 | [`packages/automation-core/src/preflight.ts`](packages/automation-core/src/preflight.ts) | Validates runner inputs, start selection, enabled ranges, and bootstrap URL choice. |
