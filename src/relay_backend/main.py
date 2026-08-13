@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import boto3
+import httpx2
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -13,6 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from relay_backend.contract import load_automation_openapi_contract, load_openapi_contract
 from relay_backend.controllers.namespaces import router as namespace_router
+from relay_backend.controllers.runs import router as run_router
 from relay_backend.controllers.workflows import router as workflow_router
 from relay_backend.data.database import Database
 from relay_backend.data.idempotency_repository import IdempotencyRepository
@@ -20,6 +22,7 @@ from relay_backend.data.namespace_repository import NamespaceRepository
 from relay_backend.document_store import S3WorkflowDocumentStore
 from relay_backend.errors import (
     AuthenticationError,
+    AutomationUnavailableError,
     IdempotencyConflictError,
     NamespaceConflictError,
     NamespaceNotFoundError,
@@ -54,17 +57,28 @@ def create_app(
     settings: Settings | None = None,
     service: WorkflowService | None = None,
     namespace_service: NamespaceService | None = None,
+    automation_client: httpx2.AsyncClient | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime_settings = settings or Settings()
         app.state.settings = runtime_settings
+        owns_automation_client = automation_client is None
+        app.state.automation_client = automation_client or httpx2.AsyncClient(
+            follow_redirects=False,
+            timeout=httpx2.Timeout(connect=5.0, read=None, write=30.0, pool=5.0),
+            trust_env=False,
+        )
         if service is not None:
             app.state.workflow_service = service
             app.state.namespace_service = namespace_service
             if app.state.namespace_service is None and hasattr(service, "database"):
                 app.state.namespace_service = NamespaceService(service.database)
-            yield
+            try:
+                yield
+            finally:
+                if owns_automation_client:
+                    await app.state.automation_client.aclose()
             return
 
         database = Database(runtime_settings.database_url)
@@ -86,6 +100,8 @@ def create_app(
         try:
             yield
         finally:
+            if owns_automation_client:
+                await app.state.automation_client.aclose()
             database.close()
 
     app = FastAPI(
@@ -126,6 +142,7 @@ def create_app(
     app.add_middleware(RequestBodyLimitMiddleware)
     app.include_router(namespace_router)
     app.include_router(workflow_router)
+    app.include_router(run_router)
     _install_error_handlers(app)
     return app
 
@@ -188,15 +205,22 @@ def _install_error_handlers(app: FastAPI) -> None:
             return _error_response(409, "namespace_conflict", str(error))
         if isinstance(error, PersistenceUnavailableError):
             return _error_response(503, "unavailable", str(error))
+        if isinstance(error, AutomationUnavailableError):
+            return _error_response(503, "automation_unavailable", str(error))
         return _error_response(500, "internal", "The workflow storage operation failed.")
 
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, error: Exception) -> JSONResponse:
+        safe_path = (
+            "/v1/artifacts/{artifactId}"
+            if request.url.path.startswith("/v1/artifacts/")
+            else request.url.path
+        )
         logger.error(
             "Unhandled %s during %s %s",
             type(error).__name__,
             request.method,
-            request.url.path,
+            safe_path,
         )
         return _error_response(500, "internal", "The workflow storage operation failed.")
 

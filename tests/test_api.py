@@ -453,7 +453,9 @@ def test_served_openapi_is_the_authenticated_repository_contract(client: TestCli
     assert response.status_code == 200
     contract = response.json()
     assert contract["openapi"] == "3.1.0"
-    assert contract["info"]["version"] == "1.1.0"
+    assert contract["info"]["version"] == "1.2.0"
+    assert contract["paths"]["/v1/run-by-id"]["post"]["operationId"] == "runWorkflowById"
+    assert contract["paths"]["/v1/artifacts/{artifactId}"]["get"]["operationId"] == "getRunArtifact"
     assert contract["security"] == [{"basicAuth": []}]
     assert contract["components"]["securitySchemes"]["basicAuth"] == {
         "type": "http",
@@ -461,11 +463,13 @@ def test_served_openapi_is_the_authenticated_repository_contract(client: TestCli
         "description": "Shared credentials configured by the backend operator.",
     }
     assert set(contract["paths"]) == {
+        "/v1/artifacts/{artifactId}",
         "/v1/namespaces",
         "/v1/namespaces/{namespaceId}",
         "/v1/namespaces/{namespaceId}/workflows",
         "/v1/namespaces/{namespaceId}/workflows/{workflowId}",
         "/v1/namespaces/{namespaceId}/workflows/{workflowId}/finish",
+        "/v1/run-by-id",
         "/v1/workflows",
         "/v1/workflows/{workflowId}",
         "/v1/workflows/{workflowId}/finish",

@@ -4,7 +4,7 @@ info:
   version: 1.3.0
   summary: Immediate and in-memory background execution of finalized Relay workflows.
   description: |
-    Unauthenticated local-development API for running complete schema 1.3 workflows in
+    Unauthenticated local-development API for running complete workflows in
     fresh Browserbase sessions. Direct runs are streamed, while background batches are
     kept only in process memory. Bind to loopback and do not expose this POC publicly.
     Runs must not be retried automatically because browser actions can have side effects.
@@ -214,7 +214,7 @@ components:
       properties:
         workflow:
           type: object
-          description: Complete canonical Relay schema 1.3 workflow document. Earlier versions are rejected before provider provisioning.
+          description: Complete canonical Relay workflow document. The required schemaVersion is treated as opaque metadata.
         startStepId:
           type: string
           minLength: 1
@@ -244,14 +244,13 @@ components:
           properties:
             schemaVersion:
               type: string
-              const: "1.3"
             id:
               type: string
               format: uuid
             status:
               type: string
               const: complete
-          description: Complete canonical schema 1.3 workflow validated again before provisioning.
+          description: Complete canonical workflow validated again before provisioning. The schemaVersion value does not affect admission.
     BatchAccepted:
       type: object
       additionalProperties: false

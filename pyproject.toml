@@ -12,6 +12,7 @@ dependencies = [
   "alembic",
   "boto3",
   "fastapi",
+  "httpx2",
   "psycopg[binary,pool]",
   "pydantic-settings",
   "pyyaml",
@@ -22,7 +23,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "httpx2",
   "jsonschema",
   "openapi-spec-validator",
   "pytest",

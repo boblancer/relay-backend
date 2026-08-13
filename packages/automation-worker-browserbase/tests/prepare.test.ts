@@ -3,13 +3,12 @@ import { prepareWorkflow, WorkerValidationError } from "../src/prepare.js";
 import { completeWorkflow, fillStep } from "./fixtures.js";
 
 describe("prepareWorkflow", () => {
-  it("rejects legacy workflows and drafts", () => {
+  it("accepts all schema versions and rejects drafts", () => {
     const complete = completeWorkflow([fillStep("recorded", { source: "recorded" })]);
 
-    for (const schemaVersion of ["1.0", "1.1", "1.2"]) {
-      expect(() => prepareWorkflow({ ...complete, schemaVersion }, undefined, {})).toThrow(
-        expect.objectContaining({ code: "invalid_workflow" }),
-      );
+    for (const schemaVersion of ["1.0", "1.3", "1.4", "next"]) {
+      expect(prepareWorkflow({ ...complete, schemaVersion }, undefined, {}).workflow.schemaVersion)
+        .toBe(schemaVersion);
     }
     expect(() => prepareWorkflow({ ...complete, status: "draft" }, undefined, {})).toThrow(
       expect.objectContaining({ code: "workflow_not_complete" }),

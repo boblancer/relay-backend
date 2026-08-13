@@ -77,7 +77,7 @@ interface RunRequestBody {
 
 interface BatchRequestBody {
   runs: Array<{
-    workflow: object & { id: string; schemaVersion: "1.3"; status: "complete" };
+    workflow: object & { id: string; schemaVersion: string; status: "complete" };
   }>;
 }
 
@@ -121,7 +121,7 @@ const batchRequestSchema = {
             required: ["id", "schemaVersion", "status"],
             properties: {
               id: { type: "string", format: "uuid" },
-              schemaVersion: { const: "1.3" },
+              schemaVersion: { type: "string" },
               status: { const: "complete" },
             },
           },

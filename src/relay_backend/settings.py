@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import Field, SecretStr
+from pydantic import AnyHttpUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,3 +19,4 @@ class Settings(BaseSettings):
     access_key_id: SecretStr = Field(min_length=1)
     secret_access_key: SecretStr = Field(min_length=1)
     region: str = Field(min_length=1)
+    automation_service_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:8080")

@@ -4,11 +4,11 @@ import { locatorCandidatesForTarget, orderLocatorCandidates } from "../src/workf
 import { clickStep, workflowWith } from "./fixtures.js";
 
 describe("canonical workflow contract", () => {
-  it("accepts a strict canonical 1.3 action workflow", () => {
+  it("accepts a strict canonical action workflow", () => {
     expect(WorkflowSchema.parse(workflowWith([clickStep()]))).toEqual(workflowWith([clickStep()]));
   });
 
-  it("defaults locator exactness without accepting legacy workflows", () => {
+  it("defaults locator exactness and accepts any declared schema version", () => {
     const input = {
       ...workflowWith([clickStep()]),
       steps: [
@@ -23,7 +23,8 @@ describe("canonical workflow contract", () => {
     expect(parsed.steps[0]?.target?.candidates).toEqual([
       { kind: "testId", value: "continue", exact: true },
     ]);
-    expect(() => WorkflowSchema.parse({ ...input, schemaVersion: "1.1" })).toThrow();
+    expect(WorkflowSchema.parse({ ...input, schemaVersion: "1.1" }).schemaVersion).toBe("1.1");
+    expect(WorkflowSchema.parse({ ...input, schemaVersion: "1.4" }).schemaVersion).toBe("1.4");
   });
 
   it("rejects non-UUID workflow IDs and unexpected properties", () => {
@@ -41,7 +42,7 @@ describe("canonical workflow contract", () => {
     expect(WorkflowSchema.parse(workflow)).toEqual(workflow);
   });
 
-  it("accepts schema 1.3 assertions and rejects schema 1.2", () => {
+  it("accepts assertions independently of the declared schema version", () => {
     const assertion = {
       ...clickStep(),
       type: "assertion" as const,
@@ -50,7 +51,7 @@ describe("canonical workflow contract", () => {
     const workflow = { ...workflowWith([]), steps: [assertion] };
 
     expect(WorkflowSchema.parse(workflow)).toEqual(workflow);
-    expect(() => WorkflowSchema.parse({ ...workflow, schemaVersion: "1.2" })).toThrow();
+    expect(WorkflowSchema.parse({ ...workflow, schemaVersion: "1.2" }).schemaVersion).toBe("1.2");
   });
 
   it("rejects blank, oversized, and action-only fields on assertions", () => {

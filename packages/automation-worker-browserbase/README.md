@@ -1,6 +1,6 @@
 # @relay/automation-worker-browserbase
 
-Private Node.js worker for executing finalized Relay workflow schema 1.3 documents in
+Private Node.js worker for executing finalized Relay workflow documents in
 fresh Browserbase sessions. It owns Browserbase lifecycle and delegates browser actions
 and assertions to `@relay/automation-core`. It does not expose an HTTP API, persist run
 state, retry actions, reuse recorded sessions, or manage authentication state.
@@ -40,7 +40,8 @@ The CLI writes privacy-safe JSON Lines. It never writes workflow bodies, file pa
 URLs, payloads, parameter values, Browserbase session or connection identifiers, or raw
 provider errors. Exit codes are `0` for success, `1` for provisioning/execution failure,
 `2` for invocation or validation failure, `124` for timeout, and `130` for cancellation.
-Schema 1.0 through 1.2 workflows are rejected before a Browserbase session is created.
+The required `schemaVersion` string is treated as opaque metadata and does not affect
+whether a Browserbase session is created.
 
 ## Configuration
 

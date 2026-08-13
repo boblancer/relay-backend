@@ -40,6 +40,7 @@ class ErrorCode(StrEnum):
     NAMESPACE_CONFLICT = "namespace_conflict"
     UNAVAILABLE = "unavailable"
     INTERNAL = "internal"
+    AUTOMATION_UNAVAILABLE = "automation_unavailable"
 
 
 class ErrorDetail(ApiModel):
@@ -344,6 +345,25 @@ class WorkflowSummary(ApiModel):
 
 class WorkflowListResponse(ApiModel):
     workflows: list[WorkflowSummary]
+
+
+class RunWorkflowByIdRequest(ApiModel):
+    model_config = ConfigDict(
+        populate_by_name=False,
+        validate_by_alias=True,
+        validate_by_name=False,
+    )
+
+    workflow_id: UUID
+    start_step_id: NonEmptyString | None = None
+    parameter_values: dict[str, str] | None = None
+
+    @field_validator("start_step_id", "parameter_values", mode="before")
+    @classmethod
+    def reject_explicit_null(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("Optional run fields must be omitted instead of null.")
+        return value
 
 
 def to_workflow_summary(workflow: Workflow) -> WorkflowSummary:

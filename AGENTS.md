@@ -2,7 +2,7 @@
 
 Relay Backend is a Python 3.12 FastAPI proof of concept that persists Browser Memory
 Recorder workflow documents in a private S3-compatible bucket and their metadata in
-PostgreSQL, with separate TypeScript packages for
+PostgreSQL and proxies authenticated UUID-based direct runs to separate TypeScript packages for
 Browserbase execution and unauthenticated loopback streaming/in-memory batch HTTP transport. Before
 changing the repository, read
 [`NAVIGATION.md`](NAVIGATION.md); it is the canonical architecture, ownership, and file
@@ -47,6 +47,8 @@ setup step, or file location changes.
 - List queries must read only safe summaries, not canonical workflow documents.
 - Keep runtime SQL parameterized.
 - Keep `openapi.yaml`, Pydantic models, controllers, and tests synchronized.
+- Keep the UUID run gateway streaming and non-retrying. Never log run bodies, parameter
+  values, artifact IDs, or artifact URLs; close upstream work when the caller disconnects.
 - Add a sequential ADR under [`docs/decisions/`](docs/decisions/) when changing a
   costly-to-reverse architectural decision; supersede rather than delete old ADRs.
 

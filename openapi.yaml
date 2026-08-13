@@ -1,15 +1,16 @@
 openapi: 3.1.0
 info:
   title: Browser Memory Recorder Cloud Workflow API
-  version: 1.1.0
-  summary: Cloud persistence contract for canonical browser workflows.
+  version: 1.2.0
+  summary: Cloud persistence and authenticated execution gateway for canonical browser workflows.
   description: |
     This contract is the handoff boundary between Browser Memory Recorder's
     local BFF and a separately implemented cloud persistence backend.
 
-    Version 1 intentionally covers workflow persistence plus shared HTTP Basic
-    authentication. It does not define profiles, deletion, migration,
-    pagination, collaboration, replay execution, or local-file mirroring.
+    Version 1 covers workflow persistence plus an authenticated gateway that resolves
+    stored workflows into the separately operated execution service. It does not define
+    profiles, deletion, migration, pagination, collaboration, durable run state, or
+    local-file mirroring.
 
     The backend is authoritative for workflow identity, lifecycle fields,
     timestamps, and revisions. All writes must be atomic. Workflow values can
@@ -21,6 +22,8 @@ tags:
     description: Organizational workflow containers.
   - name: Workflows
     description: Canonical workflow persistence.
+  - name: Runs
+    description: Authenticated workflow resolution and streaming execution gateway.
 x-contract-semantics:
   canonicalSchemaVersion: "1.2"
   maximumRequestBytes: 1048576
@@ -40,6 +43,7 @@ x-contract-semantics:
   privacyRules:
     - Never include step payloads, targets, parameter values, or source session IDs in list responses.
     - Never include workflow content or sensitive values in error messages.
+    - Never log run request bodies, parameter values, artifact IDs, or artifact URLs.
 
 security:
   - basicAuth: []
@@ -489,6 +493,104 @@ paths:
         "500":
           $ref: "#/components/responses/Internal"
 
+  /v1/run-by-id:
+    post:
+      operationId: runWorkflowById
+      tags:
+        - Runs
+      summary: Run one stored workflow by UUID
+      description: |
+        Resolves the complete stored workflow and forwards it to the private automation
+        service. Successful execution streams the same privacy-safe JSON Lines as the
+        direct automation route. The gateway does not buffer, retain, retry, or make
+        execution idempotent; disconnecting cancels the upstream run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunWorkflowByIdRequest"
+      responses:
+        "200":
+          description: Privacy-safe progress events followed by one terminal outcome.
+          headers:
+            X-Run-Id:
+              description: Ephemeral correlation UUID repeated in each JSON Line.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                description: Newline-delimited run stream lines from the automation service.
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "406":
+          $ref: "#/components/responses/AutomationRejection"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "415":
+          $ref: "#/components/responses/AutomationRejection"
+        "422":
+          $ref: "#/components/responses/AutomationRejection"
+        "429":
+          $ref: "#/components/responses/AutomationRejection"
+        "500":
+          $ref: "#/components/responses/AutomationRejection"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /v1/artifacts/{artifactId}:
+    get:
+      operationId: getRunArtifact
+      tags:
+        - Runs
+      summary: Read a temporary terminal screenshot
+      description: |
+        Proxies an opaque, temporary artifact capability from the private automation
+        service. Artifact IDs and URLs are sensitive and must not be logged.
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Compressed terminal viewport thumbnail.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+            X-Content-Type-Options:
+              schema:
+                type: string
+                const: nosniff
+          content:
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/AutomationRejection"
+        "406":
+          $ref: "#/components/responses/AutomationRejection"
+        "500":
+          $ref: "#/components/responses/AutomationRejection"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
 components:
   securitySchemes:
     basicAuth:
@@ -716,6 +818,26 @@ components:
                   code: internal
                   message: The workflow storage operation failed.
 
+    AutomationRejection:
+      description: The private automation service rejected or failed the request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AutomationErrorResponse"
+
+    AutomationUnavailable:
+      description: The automation service is unavailable or shutting down.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AutomationErrorResponse"
+          examples:
+            unavailable:
+              value:
+                error:
+                  code: automation_unavailable
+                  message: The automation service is unavailable.
+
   schemas:
     ErrorCode:
       type: string
@@ -728,6 +850,7 @@ components:
         - namespace_conflict
         - unavailable
         - internal
+        - automation_unavailable
 
     ErrorResponse:
       type: object
@@ -748,6 +871,43 @@ components:
               type: string
               minLength: 1
               description: Safe message that contains no workflow or storage details.
+
+    AutomationErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              minLength: 1
+            message:
+              type: string
+              minLength: 1
+
+    RunWorkflowByIdRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - workflowId
+      properties:
+        workflowId:
+          type: string
+          format: uuid
+        startStepId:
+          type: string
+          minLength: 1
+        parameterValues:
+          type: object
+          additionalProperties:
+            type: string
 
     CreateNamespaceRequest:
       type: object

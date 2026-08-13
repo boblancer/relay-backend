@@ -736,7 +736,9 @@ describe("automation service contract", () => {
       method: "POST",
       url: "/v1/batches",
       headers: batchHeaders(),
-      payload: { runs: [{ workflow: { ...batchWorkflow(1), schemaVersion: "1.2" } }] },
+      payload: {
+        runs: [{ workflow: { ...batchWorkflow(1), schemaVersion: undefined } }],
+      },
     });
     const empty = await service.app.inject({
       method: "POST",

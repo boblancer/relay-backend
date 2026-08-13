@@ -205,20 +205,15 @@ describe("BrowserbaseAutomationWorker", () => {
     expect(fixture.create).not.toHaveBeenCalled();
   });
 
-  it("rejects schema 1.2 before creating a paid session", async () => {
+  it("runs workflows regardless of the declared schema version", async () => {
     const fixture = workerFixture();
     const workflow = completeWorkflow([navigateStep()]);
     const worker = new BrowserbaseAutomationWorker({ apiKey: "api-key" }, fixture.dependencies);
 
     const outcome = await worker.run({ workflow: { ...workflow, schemaVersion: "1.2" } });
 
-    expect(outcome).toEqual({
-      status: "failed",
-      stage: "validation",
-      code: "invalid_workflow",
-      cleanupStatus: "not_started",
-    });
-    expect(fixture.create).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "completed", stage: "execution" });
+    expect(fixture.create).toHaveBeenCalledOnce();
   });
 
   it("reports assertion failures with a privacy-safe asserting phase", async () => {
