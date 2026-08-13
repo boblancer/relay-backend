@@ -1,7 +1,7 @@
 # @relay/automation-core
 
 Private, provider-neutral TypeScript automation library for sequential background
-execution of Relay workflow schema 1.3 documents. The caller owns the browser and
+execution of Relay workflow documents. The caller owns the browser and
 passes an existing Playwright `Page`; this package does not create browser sessions,
 persist runs, or expose a service API.
 
@@ -40,11 +40,12 @@ a unique visible match. Fill steps recorded against a combobox clear and type
 sequentially to preserve the input-event behavior expected by autocomplete controls;
 ordinary fills and date inputs continue to use Playwright's direct `fill()` action.
 
-Schema 1.3 assertion steps are evaluated once after the preceding action has settled.
+Assertion steps are evaluated once after the preceding action has settled.
 `visible` requires one uniquely resolved visible target. `text_contains` applies
 case-insensitive, whitespace-normalized containment to the target's visible text.
 Assertions emit the `asserting` phase, do not settle afterward, and return only fixed
-privacy-safe failure diagnostics. Earlier workflow schema versions are rejected.
+privacy-safe failure diagnostics. `schemaVersion` is required string metadata but its
+value does not affect validation or execution admission.
 
 `AutomationRunnerOptions.stepTimeoutMs` controls navigation, locator, action, and wait
 deadlines. It defaults to 15 seconds; remote consumers can select a longer deadline.

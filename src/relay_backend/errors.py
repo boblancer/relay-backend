@@ -50,6 +50,11 @@ class PersistenceUnavailableError(WorkflowError):
         super().__init__("Workflow storage is temporarily unavailable.")
 
 
+class AutomationUnavailableError(WorkflowError):
+    def __init__(self) -> None:
+        super().__init__("The automation service is unavailable.")
+
+
 class InternalPersistenceError(WorkflowError):
     def __init__(self) -> None:
         super().__init__("The workflow storage operation failed.")

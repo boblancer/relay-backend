@@ -112,7 +112,7 @@ describe("automation HTTP and worker integration", () => {
     await service.shutdown();
   });
 
-  it("rejects schema 1.2 with a safe 422 before a paid session", async () => {
+  it("runs workflows regardless of the declared schema version", async () => {
     const { create, service } = integrationService();
 
     const response = await service.app.inject({
@@ -125,14 +125,8 @@ describe("automation HTTP and worker integration", () => {
       payload: { workflow: { ...navigationWorkflow(), schemaVersion: "1.2" } },
     });
 
-    expect(response.statusCode).toBe(422);
-    expect(response.json()).toEqual({
-      error: {
-        code: "invalid_workflow",
-        message: "The automation run input is invalid.",
-      },
-    });
-    expect(create).not.toHaveBeenCalled();
+    expect(response.statusCode).toBe(200);
+    expect(create).toHaveBeenCalledOnce();
     await service.shutdown();
   });
 

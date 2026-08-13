@@ -778,6 +778,7 @@ dependencies = [
     { name = "alembic" },
     { name = "boto3" },
     { name = "fastapi" },
+    { name = "httpx2" },
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
@@ -788,7 +789,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "httpx2" },
     { name = "jsonschema" },
     { name = "openapi-spec-validator" },
     { name = "pytest" },
@@ -800,7 +800,7 @@ requires-dist = [
     { name = "alembic" },
     { name = "boto3" },
     { name = "fastapi" },
-    { name = "httpx2", marker = "extra == 'dev'" },
+    { name = "httpx2" },
     { name = "jsonschema", marker = "extra == 'dev'" },
     { name = "openapi-spec-validator", marker = "extra == 'dev'" },
     { name = "psycopg", extras = ["binary", "pool"] },

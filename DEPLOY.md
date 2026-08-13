@@ -27,6 +27,7 @@ Create a new service in Railway:
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (Railway reference) |
 | `BASIC_AUTH_USERNAME` | choose a username |
 | `BASIC_AUTH_PASSWORD` | choose a strong password |
+| `AUTOMATION_SERVICE_URL` | `${{relay-automation.RAILWAY_PRIVATE_DOMAIN}}:8080` with the `http://` scheme |
 | `PORT` | `8000` |
 
 Verify: `https://<relay-api>.up.railway.app/docs` loads the Scalar API reference.
@@ -48,6 +49,10 @@ Create a second service in Railway:
 `AUTOMATION_HOST` and `AUTOMATION_SCREENSHOTS` are set in the Dockerfile defaults.
 
 Verify via Railway logs that the service starts and `/health/live` responds.
+
+Redeploy **relay-api** after the automation service's private domain is available. Verify
+an authenticated `POST /v1/run-by-id` with a completed workflow UUID; do not configure
+automatic proxy retries because browser actions can have external side effects.
 
 ## Local Docker build test
 

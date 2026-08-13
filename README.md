@@ -5,10 +5,11 @@ workflow documents, plus provider-neutral automation, a Browserbase worker, and 
 private internal execution service with streaming and in-memory batch APIs.
 The FastAPI service implements the repository's `openapi.yaml`, including atomic
 revisions, global idempotency, privacy-safe summaries, and shared HTTP Basic
-authentication. Organizational namespaces own workflows without acting as authorization
+authentication. It also exposes an authenticated UUID-based gateway to the private run
+service. Organizational namespaces own workflows without acting as authorization
 boundaries. Canonical workflow documents live in a private Railway Storage Bucket;
 PostgreSQL stores their active object keys and safe relational metadata. The service does
-not execute workflows.
+not execute workflows itself.
 
 ## Quick start
 
@@ -28,7 +29,7 @@ set -a
 source .env
 set +a
 uv run alembic upgrade head
-uv run uvicorn relay_backend.main:app --reload
+uv run uvicorn relay_backend.main:app --reload --no-access-log
 ```
 
 The API is available at `http://127.0.0.1:8000`. The read-only Scalar API reference is
@@ -37,8 +38,9 @@ at `http://127.0.0.1:8000/docs`; its selector includes **Workflow Storage** and
 `http://127.0.0.1:8000/openapi.json`. The local documentation page loads its pinned
 Scalar browser bundle from jsDelivr, so opening it requires internet access.
 
-The run reference documents the separate private Browserbase service; it does not add
-`POST /v1/run` to FastAPI. The optional local `/api/inngest` adapter is orchestration
+The run reference documents the separate private Browserbase service. FastAPI adds
+`POST /v1/run-by-id`, which resolves a stored workflow and forwards the existing run
+interface without buffering or retrying it. The optional local `/api/inngest` adapter is orchestration
 owned by the Inngest SDK, not a third Relay API, so use the local Inngest guide and UI
 rather than the API reference for that path.
 
@@ -64,8 +66,24 @@ curl \
 ```
 
 The flat `/v1/workflows` routes remain deprecated compatibility aliases in contract
-version 1.1. Flat creation targets `Default`; flat reads and mutations retain global
+version 1.2. Flat creation targets `Default`; flat reads and mutations retain global
 workflow-ID behavior. Their removal is reserved for contract version 2.0.
+
+With the private automation service running, execute a completed stored workflow by UUID:
+
+```bash
+curl \
+  --user "$BASIC_AUTH_USERNAME:$BASIC_AUTH_PASSWORD" \
+  --header "Accept: application/x-ndjson" \
+  --header "Content-Type: application/json" \
+  --data "{\"workflowId\":\"$WORKFLOW_ID\"}" \
+  --no-buffer \
+  http://127.0.0.1:8000/v1/run-by-id
+```
+
+The response is the private service's NDJSON stream. Disconnecting closes the upstream
+request, runs are never retried automatically, and relative terminal thumbnail URLs are
+served through authenticated `GET /v1/artifacts/{artifactId}`.
 
 ## Commands
 
@@ -74,7 +92,7 @@ workflow-ID behavior. Their removal is reserved for contract version 2.0.
 | `docker compose up -d --wait postgres` | Start local PostgreSQL |
 | `uv run alembic upgrade head` | Apply database migrations |
 | `uv run python -m relay_backend.backfill_workflow_documents` | Move legacy JSONB documents to the configured bucket |
-| `uv run uvicorn relay_backend.main:app --reload` | Start the API |
+| `uv run uvicorn relay_backend.main:app --reload --no-access-log` | Start the API without logging sensitive artifact URLs |
 | `uv run pytest` | Run unit, contract, API, and PostgreSQL integration tests |
 | `uv run ruff check src tests migrations` | Lint Python code |
 | `uv run ruff format --check src tests` | Verify formatting |
@@ -111,6 +129,7 @@ docker compose down --volumes
 | `ACCESS_KEY_ID` | Private Railway bucket access-key ID |
 | `SECRET_ACCESS_KEY` | Private Railway bucket secret access key |
 | `REGION` | Railway bucket region, normally `auto` |
+| `AUTOMATION_SERVICE_URL` | Private Browserbase run-service base URL; defaults to `http://127.0.0.1:8080` |
 | `TEST_DATABASE_URL` | Optional PostgreSQL URL used by tests |
 | `BROWSERBASE_API_KEY` | Browserbase worker credential; required only for real runs |
 | `BROWSERBASE_PROJECT_ID` | Optional Browserbase project selection |
@@ -165,6 +184,8 @@ Controller → Service ───┤
 - List queries select only PostgreSQL summaries and cannot accidentally return payloads
   or session IDs.
 - Alembic uses SQLAlchemy for migrations; runtime queries use Psycopg directly.
+- The run gateway resolves a stored workflow by UUID, then streams requests and responses
+  between the authenticated FastAPI boundary and the private execution service.
 
 [`packages/automation-core`](packages/automation-core/README.md) is an independent ESM
 library. A background runner supplies an existing Playwright `Page`, receives
@@ -173,11 +194,11 @@ lifecycle and any persistence. The package has no dependency on FastAPI, Postgre
 Browserbase, or the service's internal persistence model.
 
 [`packages/automation-worker-browserbase`](packages/automation-worker-browserbase/README.md)
-is the provider-specific server consumer. It validates complete schema 1.3 workflows,
+is the provider-specific server consumer. It validates complete workflows while treating
+the required `schemaVersion` value as opaque metadata,
 resolves explicit run parameters, owns fresh Browserbase session lifecycle, and returns
 privacy-safe events and outcomes. It does not add an execution route to FastAPI or
-persist run state. Earlier schema versions are rejected before provider provisioning;
-schema 1.3 visibility and text-containment assertions execute once without retries.
+persist run state. Visibility and text-containment assertions execute once without retries.
 
 [`packages/automation-service-browserbase`](packages/automation-service-browserbase/README.md)
 is a separate Fastify process exposing unauthenticated local direct and batch execution APIs.
@@ -189,6 +210,7 @@ PostgreSQL, and all batch state disappears on restart. Direct and batch terminal
 outcomes may include a one-hour loopback thumbnail URL backed by a compressed file in
 `.relay/artifacts`; files persist for manual cleanup, but URL access does not survive a
 restart. The Inngest path does not capture screenshots.
+The Node service still does not read persistence; only FastAPI performs UUID resolution.
 
 Successful idempotency records are retained indefinitely. A replay with the same key,
 method, path, and validated canonical JSON returns the original response even if the
@@ -205,8 +227,12 @@ See [ADR 0004](docs/decisions/0004-browserbase-background-worker.md) for the Bro
 worker's original boundary. See
 [ADR 0005](docs/decisions/0005-stateless-browserbase-run-service.md) for the superseding
 stateless HTTP service decision. See
-[ADR 0006](docs/decisions/0006-schema-1.3-assertion-execution.md) for the execution
-contract's schema 1.3-only assertion semantics. See
+[ADR 0006](docs/decisions/0006-schema-1.3-assertion-execution.md) for the original
+schema 1.3 assertion semantics and
+[ADR 0012](docs/decisions/0012-opaque-execution-schema-version.md) for the superseding
+version-agnostic execution admission rule. See
+[ADR 0013](docs/decisions/0013-authenticated-workflow-run-gateway.md) for the
+authenticated UUID-based FastAPI gateway. See
 [ADR 0007](docs/decisions/0007-in-memory-background-batches.md) for process-local batch
 queueing and polling. See
 [ADR 0008](docs/decisions/0008-unauthenticated-local-execution-service.md) for the

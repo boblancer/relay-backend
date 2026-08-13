@@ -110,7 +110,7 @@ export type WorkflowStep =
     });
 
 export interface Workflow {
-  schemaVersion: "1.3";
+  schemaVersion: string;
   id: string;
   name: string;
   status: "draft" | "complete";
@@ -320,7 +320,7 @@ const WorkflowStepSchema = z.discriminatedUnion("type", [
 
 export const WorkflowSchema = z
   .object({
-    schemaVersion: z.literal("1.3"),
+    schemaVersion: z.string(),
     id: z.string().uuid(),
     name: z.string().trim().min(1),
     status: z.enum(["draft", "complete"]),

@@ -7,13 +7,14 @@ commands, see [`README.md`](README.md).
 
 ## Purpose and system boundary
 
-Relay Backend is a local proof-of-concept cloud persistence service for Browser Memory
+Relay Backend is a local proof-of-concept cloud persistence service and authenticated
+execution gateway for Browser Memory
 Recorder's canonical workflow documents. A caller such as the recorder's local BFF
 sends complete workflow snapshots over HTTP. The backend authenticates the request,
 validates it against the canonical model, stores the canonical document in a private
 Railway Storage Bucket, and publishes its metadata and active object key in PostgreSQL.
 
-The persistence boundary is the OpenAPI 3.1 contract in [`openapi.yaml`](openapi.yaml).
+The authenticated FastAPI boundary is the OpenAPI 3.1 contract in [`openapi.yaml`](openapi.yaml).
 It defines three namespace operations and five canonical namespace-scoped workflow
 operations:
 
@@ -29,15 +30,19 @@ operations:
 | `finishWorkflow` | `POST /v1/namespaces/{namespaceId}/workflows/{workflowId}/finish` | Save and complete an owned workflow. |
 
 The five flat `/v1/workflows` operations remain deprecated global compatibility aliases
-for OpenAPI 1.1. Flat creation uses `Default`; removal is reserved for version 2.0.
+for OpenAPI 1.2. Flat creation uses `Default`; removal is reserved for version 2.0.
+`POST /v1/run-by-id` resolves one workflow through the global compatibility lookup and
+streams the private run service's existing interface. `GET /v1/artifacts/{artifactId}`
+preserves its temporary relative thumbnail capabilities behind shared Basic auth.
 
 The independent execution boundary is
 [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml).
 It defines unauthenticated local direct-run and in-memory batch operations plus
 liveness and readiness checks.
 
-The service does not record browser activity or execute workflows. It only persists and
-retrieves the canonical documents produced elsewhere. The repository also contains the
+The service does not record browser activity or execute workflows in-process. It persists
+and retrieves canonical documents and gateways selected documents to the private run
+service. The repository also contains the
 separate [`@relay/automation-core`](packages/automation-core/README.md) TypeScript
 library for background execution. That library neither calls the service nor owns
 persistence or browser lifecycle. The separate
@@ -45,7 +50,7 @@ persistence or browser lifecycle. The separate
 package is its Browserbase-specific server consumer.
 The separate
 [`@relay/automation-service-browserbase`](packages/automation-service-browserbase/README.md)
-package exposes that worker to local callers without adding execution
+package exposes that worker to local callers without adding execution logic
 to FastAPI or PostgreSQL.
 
 ## Sources of truth and reading order
@@ -101,7 +106,7 @@ Browser Memory Recorder / local BFF
           FastAPI auth dependency
                   |
                   v
-     Namespace/workflow HTTP controllers
+    Namespace/workflow HTTP controllers
                   |
                   v
        Namespace/workflow services
@@ -118,6 +123,11 @@ Browser Memory Recorder / local BFF
  private Railway       PostgreSQL metadata,
  Storage Bucket        summaries, pointers
 ```
+
+For UUID-based direct execution, the authenticated FastAPI controller reads the canonical
+workflow through `WorkflowService`, forwards it to the private Node `POST /v1/run`, and
+streams NDJSON back without buffering or retries. Relative artifact capabilities are
+proxied through FastAPI; disconnecting the caller closes the upstream response.
 
 Dependencies point inward from transport to business behavior to persistence. Pydantic
 models are shared by the controller, service, repository, and document store as the
@@ -153,14 +163,15 @@ POST /v1/run or /v1/batches (unauthenticated local HTTP)
              structured events and terminal result
 ```
 
-The service accepts complete canonical schema 1.3 documents, then the worker owns one
+The service accepts complete canonical documents with any string `schemaVersion`, then
+the worker owns one
 fresh Browserbase session per run. Direct runs accept explicit parameters and stream
 progress. Batches queue one to ten workflows in process memory and retain privacy-safe
 polling snapshots for one hour. All entry points share a configurable per-process
 capacity that defaults to five. Batch state is not durable and disappears on restart.
 Neither execution mode shares the Python service's transaction, repository,
-authentication, or persistence infrastructure. Earlier workflow schema versions are
-rejected before provisioning. Assertions resolve one visible target and evaluate once
+authentication, or persistence infrastructure. The version value is opaque metadata
+and does not affect admission. Assertions resolve one visible target and evaluate once
 in workflow order without retries or post-assertion settling.
 
 For direct and batch work, the Browserbase worker can capture the visible viewport after
@@ -174,7 +185,8 @@ batch/run metadata disappear on restart. The Inngest path does not request captu
 [`src/relay_backend/main.py`](src/relay_backend/main.py) builds the FastAPI application:
 
 - The lifespan handler loads environment-backed settings and opens a Psycopg connection
-  pool plus an S3-compatible Railway document store. Tests constructor-inject a service
+  pool, an S3-compatible Railway document store, and a non-retrying async automation HTTP
+  client. Tests constructor-inject services and clients
   with an in-memory store and avoid creating production dependencies.
 - `RequestBodyLimitMiddleware` runs before routing and enforces the 1 MiB body limit
   from the contract, including streamed bodies without a usable `Content-Length`.
@@ -414,7 +426,7 @@ are package markers and contain no runtime behavior.
 | [`tests/test_api.py`](tests/test_api.py) | Proves authentication, routes, errors, limits, and served-contract behavior. |
 | [`tests/conftest.py`](tests/conftest.py) | Applies migrations once and cleans workflow, idempotency, and non-default namespace test data. |
 | [`docs/decisions/`](docs/decisions/) | Preserves the rationale and consequences of accepted architecture/security decisions. |
-| [`packages/automation-core/src/workflow.ts`](packages/automation-core/src/workflow.ts) | Defines the strict TypeScript schema 1.3 execution contract, assertions, and locator ordering. |
+| [`packages/automation-core/src/workflow.ts`](packages/automation-core/src/workflow.ts) | Defines the strict TypeScript execution contract, opaque schema-version metadata, assertions, and locator ordering. |
 | [`packages/automation-core/src/preflight.ts`](packages/automation-core/src/preflight.ts) | Validates runner inputs, start selection, enabled ranges, and bootstrap URL choice. |
 | [`packages/automation-core/src/target-resolution.ts`](packages/automation-core/src/target-resolution.ts) | Owns frame selection, locator construction, uniqueness and visibility checks, and recorded element fingerprint validation. |
 | [`packages/automation-core/src/step-actions.ts`](packages/automation-core/src/step-actions.ts) | Owns canonical Playwright actions, combobox input fidelity, assertions, and recorded page-position restoration. |
@@ -442,6 +454,7 @@ are package markers and contain no runtime behavior.
 | Change canonical document storage | [`document_store.py`](src/relay_backend/document_store.py) | Service transactions, settings, migration/backfill behavior, privacy tests, and ADR 0010. |
 | Change list output | `WorkflowSummary` and `to_workflow_summary` in [`models/workflows.py`](src/relay_backend/models/workflows.py) | Repository list query, OpenAPI schemas, and privacy assertions. |
 | Change authentication | [`auth.py`](src/relay_backend/auth.py) | Settings, OpenAPI security, API tests, and ADR 0002. |
+| Change the UUID run gateway | [`controllers/runs.py`](src/relay_backend/controllers/runs.py) | Root OpenAPI, gateway tests, deployment settings, and ADR 0013. |
 | Change error behavior | [`errors.py`](src/relay_backend/errors.py) and [`main.py`](src/relay_backend/main.py) | OpenAPI responses and safe-error tests. |
 | Change request-size limits | [`request_limits.py`](src/relay_backend/request_limits.py) | `x-contract-semantics`, request-body docs, and boundary tests. |
 | Add configuration | [`settings.py`](src/relay_backend/settings.py) | [`.env.example`](.env.example), README configuration table, and tests. |
@@ -471,6 +484,9 @@ are package markers and contain no runtime behavior.
   source session IDs.
 - Errors and logs never include workflow bodies, credentials, object keys, or other
   persistence details.
+- The authenticated UUID run gateway does not buffer or retry execution, forwards only
+  safe response headers, closes upstream streams on disconnect, and never logs workflow
+  bodies, parameter values, artifact IDs, or artifact URLs.
 - Runtime SQL remains parameterized.
 - Request bodies larger than 1 MiB are rejected whether or not `Content-Length` is
   present or valid.
@@ -478,7 +494,8 @@ are package markers and contain no runtime behavior.
   persist browser sessions, call Browserbase, or depend on FastAPI/PostgreSQL.
 - Automation events, terminal results, and thrown execution diagnostics exclude action
   payloads, target and locator values, URLs, workflow bodies, and source session IDs.
-- The Browserbase worker accepts only complete schema 1.3 workflows, never reuses the
+- The Browserbase worker accepts complete workflows regardless of the declared schema
+  version, never reuses the
   recorded source session, never retries actions, and always attempts session cleanup.
 - Assertions evaluate once, emit `asserting`, never settle afterward, and never expose
   expected or observed text in diagnostics.
@@ -503,6 +520,8 @@ are package markers and contain no runtime behavior.
   `BASIC_AUTH_USERNAME`, `BASIC_AUTH_PASSWORD`, `BUCKET`, `ENDPOINT`, `ACCESS_KEY_ID`,
   `SECRET_ACCESS_KEY`, and `REGION`. Tests constructor-inject an in-memory document store
   and optionally use `TEST_DATABASE_URL` directly from fixture configuration.
+- `AUTOMATION_SERVICE_URL` selects the private run-service base URL and defaults to
+  `http://127.0.0.1:8080` for local development.
 - The Browserbase worker reads `BROWSERBASE_API_KEY` for real runs and optionally
   `BROWSERBASE_PROJECT_ID`, `BROWSERBASE_REGION`, `BROWSERBASE_USE_PROXY`, and
   `BROWSERBASE_VERIFIED`. Validation-only CLI use does not require credentials.
@@ -537,6 +556,8 @@ Compose database when that variable is absent. Before each test, fixtures trunca
   conflicts, rollback behavior, concurrent writers, ordering, and privacy-safe reads.
 - API tests exercise the assembled FastAPI app, shared authentication, contract error
   shapes, request limits, safe failures, and the exact served OpenAPI document.
+- Run-gateway API tests use an in-process HTTP transport to prove UUID resolution,
+  byte-for-byte streaming, safe header/error forwarding, and artifact-log privacy.
 - Automation package tests are pure TypeScript tests. They exercise schema/preflight,
   all nine Playwright actions, locator/frame behavior, settling and waits,
   cancellation, sequential fail-fast execution, and privacy-safe diagnostics.
@@ -548,7 +569,7 @@ Compose database when that variable is absent. Before each test, fixtures trunca
 
 ## POC boundaries
 
-The persistence service intentionally excludes user accounts, tenants, ownership rules,
+The FastAPI service intentionally excludes user accounts, tenants, ownership rules,
 pagination, deletion, workflow-schema migration, collaboration, replay execution,
 local-file mirroring, application-level encryption, production deployment configuration,
 and idempotency-record expiry. The automation library intentionally excludes browser
@@ -614,6 +635,8 @@ agree with the code.
 - [`ADR 0008: Unauthenticated local execution service`](docs/decisions/0008-unauthenticated-local-execution-service.md)
 - [`ADR 0009: Local terminal screenshot artifacts`](docs/decisions/0009-local-terminal-screenshot-artifacts.md)
 - [`ADR 0010: Railway workflow document storage`](docs/decisions/0010-railway-workflow-document-storage.md)
+- [`ADR 0012: Treat execution schema versions as opaque`](docs/decisions/0012-opaque-execution-schema-version.md)
+- [`ADR 0013: Add an authenticated workflow run gateway`](docs/decisions/0013-authenticated-workflow-run-gateway.md)
 
 When a decision changes, add a new sequential record that supersedes the older one.
 Preserve accepted historical records rather than rewriting or deleting their rationale.

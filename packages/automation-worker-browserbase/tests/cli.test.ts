@@ -58,24 +58,26 @@ describe("runCli", () => {
     expect(fixture.writes.join("\n")).not.toContain("/private/workflow.json");
   });
 
-  it("returns a safe validation failure for legacy or unreadable files", async () => {
-    const legacy = JSON.stringify({
+  it("validates workflows with older schema labels", async () => {
+    const workflow = JSON.stringify({
       ...completeWorkflow([navigateStep()]),
       schemaVersion: "1.2",
     });
-    const legacyFixture = cliFixture({ "/private/legacy.json": legacy });
+    const fixture = cliFixture({ "/private/workflow.json": workflow });
 
     await expect(
       runCli(
-        ["validate", "--workflow", "/private/legacy.json"],
+        ["validate", "--workflow", "/private/workflow.json"],
         {},
-        legacyFixture.dependencies,
+        fixture.dependencies,
       ),
-    ).resolves.toBe(2);
-    expect(legacyFixture.writes.map((line) => JSON.parse(line))).toEqual([
-      { type: "validation.failed", status: "failed", code: "invalid_workflow" },
+    ).resolves.toBe(0);
+    expect(fixture.writes.map((line) => JSON.parse(line))).toEqual([
+      { type: "validation.completed", status: "completed", totalSteps: 1 },
     ]);
+  });
 
+  it("returns a safe validation failure for unreadable files", async () => {
     const missingFixture = cliFixture({});
     await expect(
       runCli(

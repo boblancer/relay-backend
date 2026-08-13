@@ -53,15 +53,15 @@ development proxy because this service does not add a public CORS boundary.
 }
 ```
 
-The workflow must be a complete canonical schema 1.3 document. Earlier schema versions
-are rejected before Browserbase provisioning. Provider configuration
+The workflow must be a complete canonical document. Its required `schemaVersion` string
+is treated as opaque metadata and does not affect admission. Provider configuration
 cannot be overridden by the request. Successful preflight returns
 `application/x-ndjson`; every line contains the response's ephemeral `X-Run-Id`.
 Progress events and 15-second heartbeats are followed by exactly one
 `worker.outcome` line. When terminal screenshot capture succeeds, that line also
 contains a relative `thumbnail` URL and fixed WebP metadata.
 
-Schema 1.3 action and assertion steps run in workflow order. Assertion failures use the
+Action and assertion steps run in workflow order. Assertion failures use the
 same safe scalar terminal fields as other execution failures and never expose expected
 or observed page text. Optional thumbnail metadata is a separate sensitive capability.
 
