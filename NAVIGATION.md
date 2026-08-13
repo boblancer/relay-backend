@@ -30,10 +30,12 @@ operations:
 | `finishWorkflow` | `POST /v1/namespaces/{namespaceId}/workflows/{workflowId}/finish` | Save and complete an owned workflow. |
 
 The five flat `/v1/workflows` operations remain deprecated global compatibility aliases
-for OpenAPI 1.2. Flat creation uses `Default`; removal is reserved for version 2.0.
+for OpenAPI 1.3. Flat creation uses `Default`; removal is reserved for version 2.0.
 `POST /v1/run-by-id` resolves one workflow through the global compatibility lookup and
-streams the private run service's existing interface. `GET /v1/artifacts/{artifactId}`
-preserves its temporary relative thumbnail capabilities behind shared Basic auth.
+streams the private run service's existing interface. Public `POST /v1/batches` forwards
+one to ten opaque full workflow documents and `GET /v1/batches/{batchId}` polls the
+process-local result. `GET /v1/artifacts/{artifactId}` preserves temporary relative
+thumbnail capabilities behind shared Basic auth.
 
 The independent execution boundary is
 [`packages/automation-service-browserbase/openapi.yaml`](packages/automation-service-browserbase/openapi.yaml).
@@ -128,6 +130,9 @@ For UUID-based direct execution, the authenticated FastAPI controller reads the 
 workflow through `WorkflowService`, forwards it to the private Node `POST /v1/run`, and
 streams NDJSON back without buffering or retries. Relative artifact capabilities are
 proxied through FastAPI; disconnecting the caller closes the upstream response.
+For batches, FastAPI validates only the strict public envelope, forwards each full Local
+or Relay document without persistence-model validation, and buffers at most 1 MiB of the
+private JSON response. Creation is sent exactly once.
 
 Dependencies point inward from transport to business behavior to persistence. Pydantic
 models are shared by the controller, service, repository, and document store as the
@@ -186,7 +191,7 @@ batch/run metadata disappear on restart. The Inngest path does not request captu
 
 - The lifespan handler loads environment-backed settings and opens a Psycopg connection
   pool, an S3-compatible Railway document store, and a non-retrying async automation HTTP
-  client. Tests constructor-inject services and clients
+  client with a 30-second read timeout. Tests constructor-inject services and clients
   with an in-memory store and avoid creating production dependencies.
 - `RequestBodyLimitMiddleware` runs before routing and enforces the 1 MiB body limit
   from the contract, including streamed bodies without a usable `Content-Length`.
@@ -454,7 +459,7 @@ are package markers and contain no runtime behavior.
 | Change canonical document storage | [`document_store.py`](src/relay_backend/document_store.py) | Service transactions, settings, migration/backfill behavior, privacy tests, and ADR 0010. |
 | Change list output | `WorkflowSummary` and `to_workflow_summary` in [`models/workflows.py`](src/relay_backend/models/workflows.py) | Repository list query, OpenAPI schemas, and privacy assertions. |
 | Change authentication | [`auth.py`](src/relay_backend/auth.py) | Settings, OpenAPI security, API tests, and ADR 0002. |
-| Change the UUID run gateway | [`controllers/runs.py`](src/relay_backend/controllers/runs.py) | Root OpenAPI, gateway tests, deployment settings, and ADR 0013. |
+| Change the direct or batch run gateway | [`controllers/runs.py`](src/relay_backend/controllers/runs.py) | Root OpenAPI, gateway tests, deployment settings, and ADR 0013. |
 | Change error behavior | [`errors.py`](src/relay_backend/errors.py) and [`main.py`](src/relay_backend/main.py) | OpenAPI responses and safe-error tests. |
 | Change request-size limits | [`request_limits.py`](src/relay_backend/request_limits.py) | `x-contract-semantics`, request-body docs, and boundary tests. |
 | Add configuration | [`settings.py`](src/relay_backend/settings.py) | [`.env.example`](.env.example), README configuration table, and tests. |
@@ -484,9 +489,10 @@ are package markers and contain no runtime behavior.
   source session IDs.
 - Errors and logs never include workflow bodies, credentials, object keys, or other
   persistence details.
-- The authenticated UUID run gateway does not buffer or retry execution, forwards only
-  safe response headers, closes upstream streams on disconnect, and never logs workflow
-  bodies, parameter values, artifact IDs, or artifact URLs.
+- The authenticated direct gateway does not buffer or retry execution and closes upstream
+  streams on disconnect. The batch gateway never retries creation and buffers at most
+  1 MiB before responding. Both forward only safe response headers and never log workflow
+  bodies, parameter values, batch IDs, artifact IDs, artifact URLs, or private URLs.
 - Runtime SQL remains parameterized.
 - Request bodies larger than 1 MiB are rejected whether or not `Content-Length` is
   present or valid.
@@ -522,6 +528,9 @@ are package markers and contain no runtime behavior.
   and optionally use `TEST_DATABASE_URL` directly from fixture configuration.
 - `AUTOMATION_SERVICE_URL` selects the private run-service base URL and defaults to
   `http://127.0.0.1:8080` for local development.
+- Remote deployments use the Railway private domain, keep screenshots disabled initially,
+  and run exactly one automation-service replica because all batch and artifact access
+  state is process-local.
 - The Browserbase worker reads `BROWSERBASE_API_KEY` for real runs and optionally
   `BROWSERBASE_PROJECT_ID`, `BROWSERBASE_REGION`, `BROWSERBASE_USE_PROXY`, and
   `BROWSERBASE_VERIFIED`. Validation-only CLI use does not require credentials.
@@ -636,7 +645,7 @@ agree with the code.
 - [`ADR 0009: Local terminal screenshot artifacts`](docs/decisions/0009-local-terminal-screenshot-artifacts.md)
 - [`ADR 0010: Railway workflow document storage`](docs/decisions/0010-railway-workflow-document-storage.md)
 - [`ADR 0012: Treat execution schema versions as opaque`](docs/decisions/0012-opaque-execution-schema-version.md)
-- [`ADR 0013: Add an authenticated workflow run gateway`](docs/decisions/0013-authenticated-workflow-run-gateway.md)
+- [`ADR 0013: Add an authenticated direct and batch workflow gateway`](docs/decisions/0013-authenticated-workflow-run-gateway.md)
 
 When a decision changes, add a new sequential record that supersedes the older one.
 Preserve accepted historical records rather than rewriting or deleting their rationale.

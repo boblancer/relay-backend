@@ -5,9 +5,9 @@ workflow documents, plus provider-neutral automation, a Browserbase worker, and 
 private internal execution service with streaming and in-memory batch APIs.
 The FastAPI service implements the repository's `openapi.yaml`, including atomic
 revisions, global idempotency, privacy-safe summaries, and shared HTTP Basic
-authentication. It also exposes an authenticated UUID-based gateway to the private run
-service. Organizational namespaces own workflows without acting as authorization
-boundaries. Canonical workflow documents live in a private Railway Storage Bucket;
+authentication. It also exposes authenticated direct-run, batch, and artifact gateways
+to the private run service. Organizational namespaces own workflows without acting as
+authorization boundaries. Canonical workflow documents live in a private Railway Storage Bucket;
 PostgreSQL stores their active object keys and safe relational metadata. The service does
 not execute workflows itself.
 
@@ -39,8 +39,10 @@ at `http://127.0.0.1:8000/docs`; its selector includes **Workflow Storage** and
 Scalar browser bundle from jsDelivr, so opening it requires internet access.
 
 The run reference documents the separate private Browserbase service. FastAPI adds
-`POST /v1/run-by-id`, which resolves a stored workflow and forwards the existing run
-interface without buffering or retrying it. The optional local `/api/inngest` adapter is orchestration
+`POST /v1/run-by-id`, plus public `POST /v1/batches` and `GET /v1/batches/{batchId}`
+gateways. Batch creation accepts complete Local or Relay workflow documents as opaque
+JSON and never retries them; the private service remains authoritative for execution
+validation. The optional local `/api/inngest` adapter is orchestration
 owned by the Inngest SDK, not a third Relay API, so use the local Inngest guide and UI
 rather than the API reference for that path.
 
@@ -66,7 +68,7 @@ curl \
 ```
 
 The flat `/v1/workflows` routes remain deprecated compatibility aliases in contract
-version 1.2. Flat creation targets `Default`; flat reads and mutations retain global
+version 1.3. Flat creation targets `Default`; flat reads and mutations retain global
 workflow-ID behavior. Their removal is reserved for contract version 2.0.
 
 With the private automation service running, execute a completed stored workflow by UUID:
@@ -84,6 +86,28 @@ curl \
 The response is the private service's NDJSON stream. Disconnecting closes the upstream
 request, runs are never retried automatically, and relative terminal thumbnail URLs are
 served through authenticated `GET /v1/artifacts/{artifactId}`.
+
+Queue and poll a batch containing complete workflow documents:
+
+```bash
+curl \
+  --user "$BASIC_AUTH_USERNAME:$BASIC_AUTH_PASSWORD" \
+  --header "Accept: application/json" \
+  --header "Content-Type: application/json" \
+  --data "{\"runs\":[{\"workflow\":$WORKFLOW_JSON}]}" \
+  http://127.0.0.1:8000/v1/batches
+
+# Copy batchId from the 202 response.
+BATCH_ID="..."
+curl \
+  --user "$BASIC_AUTH_USERNAME:$BASIC_AUTH_PASSWORD" \
+  --header "Accept: application/json" \
+  "http://127.0.0.1:8000/v1/batches/$BATCH_ID"
+```
+
+FastAPI limits batch requests and buffered private responses to 1 MiB. It forwards only
+safe response headers, uses a 30-second upstream read timeout, and never logs workflow
+documents, parameters, batch IDs, artifact IDs, or private service URLs.
 
 ## Commands
 
@@ -184,8 +208,9 @@ Controller → Service ───┤
 - List queries select only PostgreSQL summaries and cannot accidentally return payloads
   or session IDs.
 - Alembic uses SQLAlchemy for migrations; runtime queries use Psycopg directly.
-- The run gateway resolves a stored workflow by UUID, then streams requests and responses
-  between the authenticated FastAPI boundary and the private execution service.
+- The run gateway resolves stored direct runs by UUID and forwards opaque full-document
+  batch requests between the authenticated FastAPI boundary and the private execution
+  service. Batch responses are bounded before the public response begins.
 
 [`packages/automation-core`](packages/automation-core/README.md) is an independent ESM
 library. A background runner supplies an existing Playwright `Page`, receives
@@ -211,6 +236,8 @@ outcomes may include a one-hour loopback thumbnail URL backed by a compressed fi
 `.relay/artifacts`; files persist for manual cleanup, but URL access does not survive a
 restart. The Inngest path does not capture screenshots.
 The Node service still does not read persistence; only FastAPI performs UUID resolution.
+Remote deployments must keep this service private and at exactly one replica because
+batch state, polling snapshots, and thumbnail capabilities are process-local.
 
 Successful idempotency records are retained indefinitely. A replay with the same key,
 method, path, and validated canonical JSON returns the original response even if the
@@ -257,3 +284,10 @@ Terminal screenshot files are a deliberate local exception to the no-persistence
 model; they have no durable API index and are never deleted automatically.
 The execution service has no authentication and defaults to loopback; it is not safe to
 expose publicly.
+
+## Browser handoff
+
+The browser automation client still needs the separate integration described in
+[`tasks/browser-remote-batch-gateway-handoff.md`](tasks/browser-remote-batch-gateway-handoff.md).
+In summary: remove `AUTOMATION_SERVICE_TOKEN`, use Relay HTTP Basic credentials only at
+the public `RELAY_API_BASE_URL`, and keep batch creation non-retrying.

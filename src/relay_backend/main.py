@@ -66,7 +66,7 @@ def create_app(
         owns_automation_client = automation_client is None
         app.state.automation_client = automation_client or httpx2.AsyncClient(
             follow_redirects=False,
-            timeout=httpx2.Timeout(connect=5.0, read=None, write=30.0, pool=5.0),
+            timeout=httpx2.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
             trust_env=False,
         )
         if service is not None:
@@ -211,11 +211,12 @@ def _install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, error: Exception) -> JSONResponse:
-        safe_path = (
-            "/v1/artifacts/{artifactId}"
-            if request.url.path.startswith("/v1/artifacts/")
-            else request.url.path
-        )
+        if request.url.path.startswith("/v1/artifacts/"):
+            safe_path = "/v1/artifacts/{artifactId}"
+        elif request.url.path.startswith("/v1/batches/"):
+            safe_path = "/v1/batches/{batchId}"
+        else:
+            safe_path = request.url.path
         logger.error(
             "Unhandled %s during %s %s",
             type(error).__name__,

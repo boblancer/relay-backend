@@ -10,7 +10,9 @@ __pycache__
 coverage.xml
 htmlcov
 node_modules
+**/node_modules
 dist
+**/dist
 .relay
 tests
 docs

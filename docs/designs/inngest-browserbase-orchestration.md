@@ -150,14 +150,14 @@ grace period.
 - Node.js 24 or newer.
 - The repository's existing package dependencies and builds.
 - `BROWSERBASE_API_KEY` for the paid test session.
-- `AUTOMATION_SERVICE_TOKEN` because the existing direct route still requires it.
+- No automation-service token; the loopback Fastify routes are intentionally
+  unauthenticated for this local POC.
 - Inngest Dev Server through `npx`; no Inngest account or key is required.
 
 ### Start the Fastify service
 
 ```bash
 export BROWSERBASE_API_KEY="your-browserbase-api-key"
-export AUTOMATION_SERVICE_TOKEN="$(openssl rand -hex 32)"
 export AUTOMATION_HOST="127.0.0.1"
 export INNGEST_DEV=1
 npm run dev --prefix packages/automation-service-browserbase

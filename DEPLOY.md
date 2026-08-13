@@ -1,58 +1,103 @@
 # Deploy to Railway
 
-Two services: **relay-api** (Python FastAPI) and **relay-automation** (Node.js Fastify).
+Two services: public **relay-api** (Python FastAPI) and private **relay-automation**
+(Node.js Fastify). Batch state is process-local, so `relay-automation` must run exactly
+one replica.
 
 ## Prerequisites
 
 - Railway account with a project created
-- GitHub repo connected to Railway
+- GitHub repository connected to Railway
+- One complete synthetic Local or Relay workflow document for gateway verification
 
 ## Steps
 
-### 1. Add Railway Postgres
+### 1. Add Railway Postgres and storage
 
-Add the **PostgreSQL** plugin from the Railway dashboard. Copy the `DATABASE_URL` from the plugin's variables.
+Add PostgreSQL and a private Storage Bucket. Expose the database URL and the bucket's
+`BUCKET`, `ENDPOINT`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, and `REGION` variables only
+to `relay-api`.
 
-### 2. Deploy relay-api
+### 2. Deploy private relay-automation
 
-Create a new service in Railway:
+Create a service from this repository with:
 
-- **Source:** this GitHub repo
-- **Dockerfile path:** `Dockerfile.api`
-- **Public networking:** enable, port `8000`
+- **Dockerfile path:** `Dockerfile.automation`
+- **Public networking:** disabled
+- **Replica count:** exactly `1`
+- **Private port:** `8080`
+- **Health-check path:** `/health/ready`
+- **Health-check port:** `8080`
 - **Environment variables:**
 
 | Variable | Value |
-|----------|-------|
-| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (Railway reference) |
-| `BASIC_AUTH_USERNAME` | choose a username |
-| `BASIC_AUTH_PASSWORD` | choose a strong password |
-| `AUTOMATION_SERVICE_URL` | `${{relay-automation.RAILWAY_PRIVATE_DOMAIN}}:8080` with the `http://` scheme |
+| --- | --- |
+| `BROWSERBASE_API_KEY` | Browserbase API key |
+| `PORT` | `8080` |
+| `AUTOMATION_HOST` | `0.0.0.0` |
+| `AUTOMATION_SCREENSHOTS` | `false` |
+
+Do not add authentication to this service and do not expose a public domain. Railway's
+private health check must report `/health/ready` as ready before configuring the API.
+
+### 3. Deploy public relay-api
+
+Create a second service from this repository with:
+
+- **Dockerfile path:** `Dockerfile.api`
+- **Public networking:** enabled on port `8000`
+- **Environment variables:**
+
+| Variable | Value |
+| --- | --- |
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` |
+| `BASIC_AUTH_USERNAME` | chosen Relay username |
+| `BASIC_AUTH_PASSWORD` | strong Relay password |
+| `BUCKET` | Railway bucket reference |
+| `ENDPOINT` | Railway bucket reference |
+| `ACCESS_KEY_ID` | Railway bucket reference |
+| `SECRET_ACCESS_KEY` | Railway bucket reference |
+| `REGION` | Railway bucket reference |
+| `AUTOMATION_SERVICE_URL` | `http://${{relay-automation.RAILWAY_PRIVATE_DOMAIN}}:8080` |
 | `PORT` | `8000` |
 
-Verify: `https://<relay-api>.up.railway.app/docs` loads the Scalar API reference.
+Verify `https://<relay-api>.up.railway.app/docs` loads the Scalar reference. Neither
+Railway nor another proxy may retry automation POST requests.
 
-### 3. Deploy relay-automation
+### 4. Verify the authenticated batch gateway
 
-Create a second service in Railway:
+Use a synthetic complete workflow that is safe to execute. Replace the URL and credentials
+without writing them into the repository:
 
-- **Source:** this GitHub repo
-- **Dockerfile path:** `Dockerfile.automation`
-- **Public networking:** disabled (private service)
-- **Environment variables:**
+```bash
+jq -n --slurpfile workflow synthetic-workflow.json \
+  '{runs: [{workflow: $workflow[0]}]}' > /tmp/relay-synthetic-batch.json
 
-| Variable | Value |
-|----------|-------|
-| `BROWSERBASE_API_KEY` | your Browserbase API key |
-| `PORT` | `8080` |
+curl \
+  --user "$BASIC_AUTH_USERNAME:$BASIC_AUTH_PASSWORD" \
+  --header "Accept: application/json" \
+  --header "Content-Type: application/json" \
+  --data-binary @/tmp/relay-synthetic-batch.json \
+  https://<relay-api>.up.railway.app/v1/batches
 
-`AUTOMATION_HOST` and `AUTOMATION_SCREENSHOTS` are set in the Dockerfile defaults.
+# Copy batchId from the 202 response.
+BATCH_ID="..."
+curl \
+  --user "$BASIC_AUTH_USERNAME:$BASIC_AUTH_PASSWORD" \
+  --header "Accept: application/json" \
+  "https://<relay-api>.up.railway.app/v1/batches/$BATCH_ID"
+```
 
-Verify via Railway logs that the service starts and `/health/live` responds.
+Repeat with the other supported document source (Local or Relay). Acceptance requires
+both documents to reach a terminal polling state through `relay-api` without any public
+access to `relay-automation`.
 
-Redeploy **relay-api** after the automation service's private domain is available. Verify
-an authenticated `POST /v1/run-by-id` with a completed workflow UUID; do not configure
-automatic proxy retries because browser actions can have external side effects.
+## Browser follow-up
+
+Follow [`tasks/browser-remote-batch-gateway-handoff.md`](tasks/browser-remote-batch-gateway-handoff.md).
+Remove `AUTOMATION_SERVICE_TOKEN`; the browser sends Relay HTTP Basic credentials only
+to the public `RELAY_API_BASE_URL`, while the private automation service remains
+unauthenticated. Preserve non-retrying batch creation.
 
 ## Local Docker build test
 

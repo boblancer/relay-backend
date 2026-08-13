@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -364,6 +364,14 @@ class RunWorkflowByIdRequest(ApiModel):
         if value is None:
             raise ValueError("Optional run fields must be omitted instead of null.")
         return value
+
+
+class BatchRunRequest(ApiModel):
+    workflow: dict[str, Any]
+
+
+class CreateBatchRequest(ApiModel):
+    runs: list[BatchRunRequest] = Field(min_length=1, max_length=10)
 
 
 def to_workflow_summary(workflow: Workflow) -> WorkflowSummary:

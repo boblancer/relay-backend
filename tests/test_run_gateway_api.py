@@ -326,6 +326,7 @@ def test_artifact_route_proxies_webp_with_safe_headers() -> None:
         assert request.method == "GET"
         assert str(request.url) == f"http://automation.internal:8080/v1/artifacts/{ARTIFACT_ID}"
         assert request.headers["accept"] == "image/webp"
+        assert request.extensions["timeout"]["read"] == 30.0
         return httpx2.Response(
             200,
             headers={
@@ -505,6 +506,8 @@ def test_persistence_contract_defines_the_uuid_run_gateway() -> None:
         contract = yaml.safe_load(contract_file)
 
     run = contract["paths"]["/v1/run-by-id"]["post"]
+    create_batch = contract["paths"]["/v1/batches"]["post"]
+    get_batch = contract["paths"]["/v1/batches/{batchId}"]["get"]
     artifact = contract["paths"]["/v1/artifacts/{artifactId}"]["get"]
 
     assert run["operationId"] == "runWorkflowById"
@@ -512,9 +515,31 @@ def test_persistence_contract_defines_the_uuid_run_gateway() -> None:
         "$ref": "#/components/schemas/RunWorkflowByIdRequest"
     }
     assert "application/x-ndjson" in run["responses"]["200"]["content"]
+    assert create_batch["operationId"] == "createBatch"
+    assert create_batch["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/BatchRequest"
+    }
+    assert get_batch["operationId"] == "getBatch"
+    assert create_batch["responses"]["202"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/BatchAccepted"
+    }
+    assert get_batch["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/BatchSnapshot"
+    }
     assert artifact["operationId"] == "getRunArtifact"
     assert "image/webp" in artifact["responses"]["200"]["content"]
     assert "automation_unavailable" in contract["components"]["schemas"]["ErrorCode"]["enum"]
+
+    schemas = contract["components"]["schemas"]
+    assert schemas["BatchRequest"]["additionalProperties"] is False
+    assert schemas["BatchRequest"]["properties"]["runs"]["minItems"] == 1
+    assert schemas["BatchRequest"]["properties"]["runs"]["maxItems"] == 10
+    assert schemas["BatchRunRequest"]["additionalProperties"] is False
+    assert schemas["BatchRunRequest"]["properties"]["workflow"] == {
+        "type": "object",
+        "additionalProperties": True,
+        "description": "Opaque executable workflow forwarded unchanged to the private service.",
+    }
 
 
 def test_unexpected_artifact_errors_do_not_log_the_artifact_id(
@@ -592,3 +617,14 @@ def test_production_server_disables_access_logging() -> None:
     start_command = Path("scripts/start-api.sh").read_text(encoding="utf-8")
 
     assert "--no-access-log" in start_command
+
+
+def test_production_automation_client_uses_bounded_timeouts() -> None:
+    app = create_app(settings=settings(), service=StubWorkflowService(complete_workflow()))
+
+    with TestClient(app):
+        timeout = app.state.automation_client.timeout
+        assert timeout.connect == 5.0
+        assert timeout.read == 30.0
+        assert timeout.write == 30.0
+        assert timeout.pool == 5.0

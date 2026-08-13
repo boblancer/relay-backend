@@ -1,16 +1,15 @@
 openapi: 3.1.0
 info:
   title: Browser Memory Recorder Cloud Workflow API
-  version: 1.2.0
+  version: 1.3.0
   summary: Cloud persistence and authenticated execution gateway for canonical browser workflows.
   description: |
     This contract is the handoff boundary between Browser Memory Recorder's
     local BFF and a separately implemented cloud persistence backend.
 
-    Version 1 covers workflow persistence plus an authenticated gateway that resolves
-    stored workflows into the separately operated execution service. It does not define
-    profiles, deletion, migration, pagination, collaboration, durable run state, or
-    local-file mirroring.
+    Version 1 covers workflow persistence plus an authenticated direct and batch gateway
+    to the separately operated execution service. It does not define profiles, deletion,
+    migration, pagination, collaboration, durable run state, or local-file mirroring.
 
     The backend is authoritative for workflow identity, lifecycle fields,
     timestamps, and revisions. All writes must be atomic. Workflow values can
@@ -27,6 +26,7 @@ tags:
 x-contract-semantics:
   canonicalSchemaVersion: "1.2"
   maximumRequestBytes: 1048576
+  maximumBatchResponseBytes: 1048576
   listOrdering: updatedAt descending
   authentication: Shared HTTP Basic credentials.
   defaultNamespaceName: Default
@@ -545,6 +545,94 @@ paths:
         "503":
           $ref: "#/components/responses/AutomationUnavailable"
 
+  /v1/batches:
+    post:
+      operationId: createBatch
+      tags:
+        - Runs
+      summary: Queue a process-local workflow batch
+      description: |
+        Forwards one to ten complete workflow documents to the private automation
+        service without interpreting their persistence schema. The private service
+        remains authoritative for executable-workflow validation. The gateway never
+        retries creation because an uncertain retry could execute browser actions twice.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchRequest"
+      responses:
+        "202":
+          description: The batch was accepted into private process memory.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchAccepted"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/AutomationRejection"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "415":
+          $ref: "#/components/responses/AutomationRejection"
+        "429":
+          $ref: "#/components/responses/AutomationRejection"
+        "500":
+          $ref: "#/components/responses/AutomationRejection"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /v1/batches/{batchId}:
+    get:
+      operationId: getBatch
+      tags:
+        - Runs
+      summary: Poll a process-local workflow batch
+      description: |
+        Proxies the private service's privacy-safe snapshot. Batch state and thumbnail
+        capabilities are process-local and disappear when that single service process
+        restarts.
+      parameters:
+        - name: batchId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Safe progress and optional sensitive thumbnail metadata.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchSnapshot"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/AutomationRejection"
+        "406":
+          $ref: "#/components/responses/AutomationRejection"
+        "500":
+          $ref: "#/components/responses/AutomationRejection"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
   /v1/artifacts/{artifactId}:
     get:
       operationId: getRunArtifact
@@ -908,6 +996,139 @@ components:
           type: object
           additionalProperties:
             type: string
+
+    BatchRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - runs
+      properties:
+        runs:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/BatchRunRequest"
+
+    BatchRunRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - workflow
+      properties:
+        workflow:
+          type: object
+          additionalProperties: true
+          description: Opaque executable workflow forwarded unchanged to the private service.
+
+    BatchAccepted:
+      type: object
+      additionalProperties: false
+      required:
+        - batchId
+        - runCount
+      properties:
+        batchId:
+          type: string
+          format: uuid
+        runCount:
+          type: integer
+          minimum: 1
+          maximum: 10
+
+    BatchSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - batchId
+        - runs
+      properties:
+        batchId:
+          type: string
+          format: uuid
+        runs:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/BatchRunSnapshot"
+
+    BatchRunSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - workflowId
+        - status
+      properties:
+        workflowId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - completed
+            - failed
+        currentStep:
+          type: integer
+          minimum: 0
+        totalSteps:
+          type: integer
+          minimum: 0
+        passedSteps:
+          type: integer
+          minimum: 0
+        skippedSteps:
+          type: integer
+          minimum: 0
+        durationMs:
+          type: integer
+          minimum: 0
+        failedStepId:
+          type: string
+        failedStepIndex:
+          type: integer
+          minimum: 0
+        phase:
+          type: string
+          enum:
+            - acting
+            - asserting
+            - settling
+            - waiting
+        code:
+          type: string
+        thumbnail:
+          $ref: "#/components/schemas/TerminalThumbnail"
+
+    TerminalThumbnail:
+      type: object
+      additionalProperties: false
+      required:
+        - url
+        - mediaType
+        - width
+        - height
+        - expiresAt
+      properties:
+        url:
+          type: string
+          pattern: ^/v1/artifacts/[0-9a-fA-F-]{36}$
+        mediaType:
+          type: string
+          const: image/webp
+        width:
+          type: integer
+          minimum: 1
+          maximum: 480
+        height:
+          type: integer
+          minimum: 1
+          maximum: 300
+        expiresAt:
+          type: string
+          format: date-time
 
     CreateNamespaceRequest:
       type: object

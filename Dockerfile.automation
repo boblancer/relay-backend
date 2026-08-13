@@ -1,33 +1,52 @@
-FROM node:24-slim
+FROM node:24-slim AS manifests
 
 WORKDIR /app
 
-# Copy all three packages and their lockfiles
-COPY packages/automation-core/package.json packages/automation-core/
-COPY packages/automation-core/package-lock.json packages/automation-core/
-COPY packages/automation-worker-browserbase/package.json packages/automation-worker-browserbase/
-COPY packages/automation-worker-browserbase/package-lock.json packages/automation-worker-browserbase/
-COPY packages/automation-service-browserbase/package.json packages/automation-service-browserbase/
-COPY packages/automation-service-browserbase/package-lock.json packages/automation-service-browserbase/
+COPY packages/automation-core/package.json packages/automation-core/package-lock.json packages/automation-core/
+COPY packages/automation-worker-browserbase/package.json packages/automation-worker-browserbase/package-lock.json packages/automation-worker-browserbase/
+COPY packages/automation-service-browserbase/package.json packages/automation-service-browserbase/package-lock.json packages/automation-service-browserbase/
 
-# Install dependencies for each package
-RUN cd packages/automation-core && npm install \
- && cd ../automation-worker-browserbase && npm install \
- && cd ../automation-service-browserbase && npm install
+FROM manifests AS build
 
-# Copy source and build in dependency order
+RUN npm ci --prefix packages/automation-core \
+ && npm ci --prefix packages/automation-worker-browserbase \
+ && npm ci --prefix packages/automation-service-browserbase
+
 COPY packages/automation-core/ packages/automation-core/
-RUN cd packages/automation-core && npm run build
-
 COPY packages/automation-worker-browserbase/ packages/automation-worker-browserbase/
-RUN cd packages/automation-worker-browserbase && npm run build
-
 COPY packages/automation-service-browserbase/ packages/automation-service-browserbase/
-RUN cd packages/automation-service-browserbase && npm run build
 
+RUN npm run build --prefix packages/automation-core \
+ && npm run build --prefix packages/automation-worker-browserbase \
+ && npm run build --prefix packages/automation-service-browserbase
+
+FROM manifests AS production-dependencies
+
+ENV NODE_ENV=production
+
+RUN npm ci --omit=dev --prefix packages/automation-core \
+ && npm ci --omit=dev --prefix packages/automation-worker-browserbase \
+ && npm ci --omit=dev --prefix packages/automation-service-browserbase
+
+FROM node:24-slim AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production
 ENV PORT=8080
 ENV AUTOMATION_HOST=0.0.0.0
 ENV AUTOMATION_SCREENSHOTS=false
+
+COPY --from=production-dependencies /app/packages/automation-core/package.json packages/automation-core/package.json
+COPY --from=production-dependencies /app/packages/automation-core/node_modules/ packages/automation-core/node_modules/
+COPY --from=production-dependencies /app/packages/automation-worker-browserbase/package.json packages/automation-worker-browserbase/package.json
+COPY --from=production-dependencies /app/packages/automation-worker-browserbase/node_modules/ packages/automation-worker-browserbase/node_modules/
+COPY --from=production-dependencies /app/packages/automation-service-browserbase/package.json packages/automation-service-browserbase/package.json
+COPY --from=production-dependencies /app/packages/automation-service-browserbase/node_modules/ packages/automation-service-browserbase/node_modules/
+
+COPY --from=build /app/packages/automation-core/dist/ packages/automation-core/dist/
+COPY --from=build /app/packages/automation-worker-browserbase/dist/ packages/automation-worker-browserbase/dist/
+COPY --from=build /app/packages/automation-service-browserbase/dist/ packages/automation-service-browserbase/dist/
 
 EXPOSE 8080
 
